@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#2b1d3a">
+<title>AriaColony — a cozy isometric colony builder</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cstyle%3Ecircle%7Bfill:%23f6c56b%7Drect%7Bfill:%237a4a2a%7D%3C/style%3E%3Crect x='14' y='24' width='36' height='28' rx='3'/%3E%3Cpolygon points='10,26 32,8 54,26' fill='%23c0392b'/%3E%3Ccircle cx='32' cy='32' r='3'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg-dawn-top: #ffd1a0;
+    --bg-dawn-mid: #ff9c8a;
+    --bg-dusk-top: #3a2755;
+    --bg-dusk-mid: #eb4d63;
+    --bg-night-top: #0c0a24;
+    --bg-night-mid: #1a1636;
+    --bg-day-top: #87ceeb;
+    --bg-day-mid: #b7e0f0;
+    --panel: rgba(24,18,40,0.85);
+    --panel-light: rgba(255,255,255,0.08);
+    --accent: #f6c56b;
+    --accent-dim: #b8925f;
+    --danger: #e85a5a;
+    --good: #7ce27c;
+    --water: #4fb3d9;
+    --text: #f4ecdb;
+    --text-dim: #a69cb0;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    color: var(--text);
+    background: #0c0a24;
+    user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+  #game {
+    display: block;
+    position: absolute; inset: 0;
+    cursor: default;
+    touch-action: none;
+  }
+  /* ─── HUD: resource bar ─── */
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: center; gap: 8px;
+    padding: 10px 12px;
+    pointer-events: none;
+    z-index: 10;
+    flex-wrap: wrap;
+  }
+  .resource {
+    background: var(--panel);
+    border: 1px solid var(--panel-light);
+    border-radius: 10px;
+    padding: 8px 14px;
+    display: inline-flex; align-items: center; gap: 8px;
+    font-variant-numeric: tabular-nums;
+    font-size: 15px; font-weight: 600;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    min-width: 84px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+  }
+  .resource .ico { font-size: 18px; line-height: 1; }
+  .resource .val { color: var(--accent); }
+  .resource .delta {
+    color: var(--good); font-size: 11px; font-weight: 500;
+    opacity: 0; transition: opacity 200ms;
+  }
+  .resource.pulse .delta { opacity: 1; }
+  /* ─── Build palette ─── */
+  #palette {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; padding: 10px;
+    background: var(--panel);
+    border: 1px solid var(--panel-light);
+    border-radius: 14px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    z-index: 10;
+    max-width: calc(100% - 20px);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  #palette::-webkit-scrollbar { display: none; }
+  .build-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    width: 68px; height: 68px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--panel-light);
+    color: var(--text);
+    cursor: pointer;
+    transition: transform 120ms, background 120ms, border-color 120ms;
+    padding: 4px;
+    font-family: inherit;
+    flex-shrink: 0;
+  }
+  .build-btn:hover, .build-btn:active { background: rgba(255,255,255,0.1); }
+  .build-btn.selected {
+    background: rgba(246,197,107,0.15);
+    border-color: var(--accent);
+    transform: translateY(-3px);
+  }
+  .build-btn.disabled { opacity: 0.45; cursor: not-allowed; }
+  .build-btn .bico { font-size: 26px; line-height: 1; }
+  .build-btn .bname { font-size: 10px; font-weight: 600; margin-top: 3px; letter-spacing: 0.3px; }
+  .build-btn .bcost { font-size: 9px; color: var(--text-dim); margin-top: 1px; }
+  .build-btn .bcost .cant { color: var(--danger); }
+  /* ─── Info panel ─── */
+  #info {
+    position: absolute; top: 56px; right: 12px;
+    width: 220px; padding: 14px;
+    background: var(--panel);
+    border: 1px solid var(--panel-light);
+    border-radius: 12px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    font-size: 13px; line-height: 1.5;
+    z-index: 9;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+    transition: opacity 180ms, transform 180ms;
+  }
+  #info.hidden { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+  #info h3 { margin: 0 0 8px; font-size: 14px; color: var(--accent); font-weight: 700; }
+  #info .row { display: flex; justify-content: space-between; margin: 3px 0; color: var(--text-dim); }
+  #info .row span:last-child { color: var(--text); font-weight: 500; }
+  #info .tip { margin-top: 8px; font-size: 11px; color: var(--text-dim); font-style: italic; }
+  #info button {
+    width: 100%; margin-top: 8px; padding: 6px;
+    background: rgba(232,90,90,0.15); color: var(--danger);
+    border: 1px solid rgba(232,90,90,0.4); border-radius: 6px;
+    font-size: 11px; cursor: pointer; font-family: inherit;
+  }
+  #info button:hover { background: rgba(232,90,90,0.25); }
+  /* ─── Minimap ─── */
+  #minimap {
+    position: absolute; top: 56px; left: 12px;
+    width: 140px; height: 140px;
+    background: var(--panel);
+    border: 1px solid var(--panel-light);
+    border-radius: 10px;
+    padding: 6px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    z-index: 9;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+  }
+  #minimap canvas { display: block; border-radius: 6px; image-rendering: pixelated; }
+  /* ─── Speed + menu ─── */
+  #topright {
+    position: absolute; top: 12px; right: 12px;
+    display: flex; gap: 6px; z-index: 11;
+  }
+  .small-btn {
+    background: var(--panel);
+    border: 1px solid var(--panel-light);
+    border-radius: 8px;
+    width: 36px; height: 36px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    font-family: inherit;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .small-btn:hover { background: rgba(255,255,255,0.1); }
+  .small-btn.active { background: var(--accent); color: #1a1636; border-color: var(--accent); font-weight: 700; }
+  /* ─── Welcome / tips ─── */
+  #toast {
+    position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+    background: var(--panel);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 13px; color: var(--text);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    z-index: 12;
+    max-width: 90%;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    transition: opacity 300ms, transform 300ms;
+  }
+  #toast.hidden { opacity: 0; transform: translate(-50%, -10px); pointer-events: none; }
+  /* ─── Welcome modal ─── */
+  #welcome {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(12,10,36,0.8);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    z-index: 100;
+    padding: 20px;
+  }
+  #welcome.hidden { display: none; }
+  #welcome .card {
+    background: linear-gradient(180deg, #241936 0%, #1a1336 100%);
+    border: 1px solid var(--panel-light);
+    border-radius: 16px;
+    padding: 28px 24px;
+    max-width: 420px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #welcome h1 {
+    margin: 0 0 6px; font-size: 30px; font-weight: 800;
+    background: linear-gradient(135deg, #f6c56b 0%, #ff9c8a 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; letter-spacing: -0.5px;
+  }
+  #welcome .sub { color: var(--text-dim); font-size: 14px; margin-bottom: 20px; }
+  #welcome .hints {
+    text-align: left; font-size: 13px; line-height: 1.7; color: var(--text-dim);
+    background: rgba(0,0,0,0.25); border-radius: 10px; padding: 12px 16px; margin-bottom: 18px;
+  }
+  #welcome .hints b { color: var(--text); }
+  #welcome button {
+    background: var(--accent); color: #1a1336;
+    border: 0; border-radius: 10px; padding: 12px 32px;
+    font-size: 16px; font-weight: 700; cursor: pointer;
+    font-family: inherit;
+    box-shadow: 0 4px 14px rgba(246,197,107,0.35);
+  }
+  #welcome button:active { transform: scale(0.97); }
+  @media (max-width: 600px) {
+    #minimap { width: 100px; height: 100px; top: 64px; }
+    #info { width: 180px; top: 64px; font-size: 12px; }
+    .build-btn { width: 56px; height: 60px; }
+    .build-btn .bico { font-size: 22px; }
+    #hud .resource { padding: 6px 10px; font-size: 13px; min-width: 70px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud"></div>
+
+<div id="topright">
+  <button class="small-btn" id="speed-btn" title="Game speed">1x</button>
+  <button class="small-btn" id="menu-btn" title="Menu">☰</button>
+</div>
+
+<div id="minimap"><canvas width="128" height="128"></canvas></div>
+
+<div id="info" class="hidden">
+  <h3 id="info-title">—</h3>
+  <div id="info-body"></div>
+  <button id="info-action" style="display:none"></button>
+</div>
+
+<div id="palette"></div>
+
+<div id="toast" class="hidden"></div>
+
+<div id="welcome">
+  <div class="card">
+    <h1>AriaColony</h1>
+    <div class="sub">A cozy isometric colony builder</div>
+    <div class="hints">
+      <div>🏰 <b>Place a Town Hall</b> to start the colony</div>
+      <div>🌲 <b>Lumberyard</b> near trees for wood</div>
+      <div>🌾 <b>Farms</b> on grass for food</div>
+      <div>🏠 <b>Houses</b> attract more colonists</div>
+      <div>👆 Click/tap to build • drag to pan</div>
+    </div>
+    <button id="welcome-start">Start building</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>

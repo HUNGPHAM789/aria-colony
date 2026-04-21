@@ -1,0 +1,908 @@
+// AriaColony — isometric colony builder. Single-file vanilla JS, canvas-based.
+// Everything procedural — no image assets.
+(() => {
+'use strict';
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+const TILE_W = 64;   // isometric diamond width (pixels)
+const TILE_H = 32;   // isometric diamond height
+const MAP_SIZE = 40; // square map dimension
+const TERRAIN = { GRASS: 0, WATER: 1, STONE: 2, FOREST: 3, SAND: 4 };
+const BUILDINGS = {
+  TOWN_HALL:   { id: 'TOWN_HALL',   name: 'Town Hall',   icon: '🏰', w: 2, h: 2, cost: { wood: 40 },              workers: 0, houses: 3, desc: 'Heart of your colony. Start here.' },
+  HOUSE:       { id: 'HOUSE',       name: 'House',       icon: '🏠', w: 1, h: 1, cost: { wood: 20 },              workers: 0, houses: 4, desc: 'Houses 4 colonists.' },
+  LUMBERYARD:  { id: 'LUMBERYARD',  name: 'Lumberyard',  icon: '🪓', w: 2, h: 1, cost: { wood: 25 },              workers: 2, produces: 'wood', rate: 1.2,    desc: 'Workers harvest nearby forest.' },
+  FARM:        { id: 'FARM',        name: 'Farm',        icon: '🌾', w: 2, h: 2, cost: { wood: 30 },              workers: 2, produces: 'food', rate: 0.9,    desc: 'Grows food on grass.' },
+  QUARRY:      { id: 'QUARRY',      name: 'Quarry',      icon: '⛏️', w: 2, h: 1, cost: { wood: 35 },              workers: 2, produces: 'stone', rate: 0.7,   desc: 'Must touch stone tiles.' },
+  MARKET:      { id: 'MARKET',      name: 'Market',      icon: '🏪', w: 1, h: 1, cost: { wood: 25, stone: 10 },   workers: 1, produces: 'gold', rate: 0.4,    desc: 'Converts resources to gold.' },
+  WELL:        { id: 'WELL',        name: 'Well',        icon: '⛲', w: 1, h: 1, cost: { stone: 20 },             workers: 0, desc: 'Boosts nearby farms.' },
+  WATCHTOWER:  { id: 'WATCHTOWER',  name: 'Watchtower',  icon: '🗼', w: 1, h: 1, cost: { wood: 20, stone: 20 },   workers: 1, desc: 'Extends your view + happiness.' },
+};
+const BUILD_ORDER = ['TOWN_HALL', 'HOUSE', 'LUMBERYARD', 'FARM', 'QUARRY', 'MARKET', 'WELL', 'WATCHTOWER'];
+
+// ─── Canvas + world state ───────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const miniCanvas = document.querySelector('#minimap canvas');
+const miniCtx = miniCanvas.getContext('2d');
+
+const state = {
+  camX: 0, camY: 0, zoom: 1,
+  map: [],              // [y][x] → terrain type
+  buildings: [],        // { id, kind, x, y, constructed, progress, workers[] }
+  colonists: [],        // { id, x, y, targetX, targetY, job, building, home, state, anim }
+  resources: { food: 20, wood: 60, stone: 15, gold: 0 },
+  resourceDelta: {},    // per-second recent deltas for UI
+  capacity: { pop: 0 },
+  pop: 0,
+  selected: null,       // {kind: building-to-place}
+  hoverTile: null,
+  selectedEntity: null, // {type, ref}
+  time: 0,              // seconds since start
+  dayLen: 120,          // seconds per full day
+  speed: 1,
+  paused: false,
+  nextId: 1,
+};
+
+// ─── Device pixel ratio resize ──────────────────────────────────────────────
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(window.innerWidth * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Map generation — simple procedural terrain ─────────────────────────────
+function generateMap() {
+  const m = [];
+  const cx = MAP_SIZE / 2, cy = MAP_SIZE / 2;
+  // Seeded pseudo-random
+  let seed = Math.floor(Math.random() * 1e9);
+  const rng = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  // Noise-ish — sum of sines
+  const noise = (x, y) =>
+    Math.sin(x * 0.31 + y * 0.22) * 0.5 +
+    Math.sin(x * 0.11 - y * 0.18 + 2.1) * 0.35 +
+    Math.sin(x * 0.55 + y * 0.4 + 4.7) * 0.15;
+  for (let y = 0; y < MAP_SIZE; y++) {
+    m[y] = [];
+    for (let x = 0; x < MAP_SIZE; x++) {
+      const n = noise(x + seed * 0.0001, y + seed * 0.00017);
+      const dc = Math.hypot(x - cx, y - cy);
+      let t = TERRAIN.GRASS;
+      if (n > 0.55) t = TERRAIN.FOREST;
+      else if (n < -0.6) t = TERRAIN.STONE;
+      if (dc > MAP_SIZE * 0.48 - 2) {
+        const edgeNoise = noise(x * 2, y * 2);
+        if (edgeNoise > 0.1) t = TERRAIN.WATER;
+      }
+      m[y][x] = t;
+    }
+  }
+  // Ensure a grassy plaza at map center
+  for (let y = cy - 3; y <= cy + 3; y++)
+    for (let x = cx - 3; x <= cx + 3; x++)
+      if (y >= 0 && x >= 0 && y < MAP_SIZE && x < MAP_SIZE) m[y][x] = TERRAIN.GRASS;
+  return m;
+}
+state.map = generateMap();
+
+// ─── Isometric projection ───────────────────────────────────────────────────
+function worldToScreen(wx, wy) {
+  // Tile (wx,wy) → pixel (sx,sy) center of diamond top.
+  const sx = (wx - wy) * (TILE_W / 2) * state.zoom;
+  const sy = (wx + wy) * (TILE_H / 2) * state.zoom;
+  return {
+    x: sx + state.camX + window.innerWidth / 2,
+    y: sy + state.camY + window.innerHeight * 0.3,
+  };
+}
+function screenToWorld(sx, sy) {
+  const x = (sx - state.camX - window.innerWidth / 2) / state.zoom;
+  const y = (sy - state.camY - window.innerHeight * 0.3) / state.zoom;
+  const wx = (x / (TILE_W / 2) + y / (TILE_H / 2)) / 2;
+  const wy = (y / (TILE_H / 2) - x / (TILE_W / 2)) / 2;
+  return { x: Math.floor(wx), y: Math.floor(wy) };
+}
+
+// ─── Rendering primitives ───────────────────────────────────────────────────
+function drawDiamond(cx, cy, w, h, fill, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - h / 2);
+  ctx.lineTo(cx + w / 2, cy);
+  ctx.lineTo(cx, cy + h / 2);
+  ctx.lineTo(cx - w / 2, cy);
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+function terrainColors(type, timeOfDay, tx, ty) {
+  // timeOfDay ∈ [0, 1), 0 = dawn
+  const t = timeOfDay;
+  const dayness = 0.5 + 0.5 * Math.sin((t - 0.25) * Math.PI * 2); // 0 midnight, 1 noon
+  const tint = 0.3 + 0.7 * dayness;
+  // Base colors
+  const base = {
+    [TERRAIN.GRASS]: [120 + (tx*37+ty*19)%15, 190 + (tx*13)%15, 100 + (ty*23)%20],
+    [TERRAIN.FOREST]: [60, 130 + (tx*7+ty*11)%20, 60],
+    [TERRAIN.STONE]: [140, 138, 142],
+    [TERRAIN.WATER]: [70, 160 + Math.sin(state.time*1.2 + tx*0.4 + ty*0.4)*20, 200],
+    [TERRAIN.SAND]: [220, 200, 150],
+  }[type];
+  const r = Math.floor(base[0] * tint);
+  const g = Math.floor(base[1] * tint);
+  const b = Math.floor(base[2] * tint);
+  return `rgb(${r},${g},${b})`;
+}
+
+// Sky gradient by time-of-day — reactive background
+function drawSky() {
+  const t = (state.time % state.dayLen) / state.dayLen;
+  const dawn = t < 0.15, day = t < 0.55, dusk = t < 0.7;
+  let top, mid;
+  if (dawn) { top = '#ffd1a0'; mid = '#ff9c8a'; }
+  else if (day) { top = '#87ceeb'; mid = '#b7e0f0'; }
+  else if (dusk) { top = '#3a2755'; mid = '#eb4d63'; }
+  else { top = '#0c0a24'; mid = '#1a1636'; }
+  const g = ctx.createLinearGradient(0, 0, 0, window.innerHeight);
+  g.addColorStop(0, top); g.addColorStop(1, mid);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+  // Stars at night
+  if (!dawn && !day && !dusk) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    for (let i = 0; i < 50; i++) {
+      const x = (i * 73) % window.innerWidth;
+      const y = (i * 47) % (window.innerHeight * 0.5);
+      const tw = 0.5 + Math.sin(state.time * 3 + i) * 0.5;
+      ctx.globalAlpha = tw * 0.8;
+      ctx.fillRect(x, y, 1.5, 1.5);
+    }
+    ctx.globalAlpha = 1;
+  }
+  // Sun/moon
+  const ax = window.innerWidth * (0.1 + t * 0.8);
+  const ay = window.innerHeight * 0.3 - Math.sin(t * Math.PI * 2) * window.innerHeight * 0.2;
+  const isMoon = t > 0.7 || t < 0.08;
+  ctx.fillStyle = isMoon ? 'rgba(240,240,255,0.85)' : 'rgba(255,220,140,0.9)';
+  ctx.shadowColor = isMoon ? 'rgba(200,200,255,0.6)' : 'rgba(255,200,100,0.7)';
+  ctx.shadowBlur = 30;
+  ctx.beginPath();
+  ctx.arc(ax, ay, isMoon ? 24 : 32, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  for (let i = 0; i < 4; i++) {
+    const cx = (window.innerWidth * ((i*0.3 + state.time*0.01) % 1.2)) - 60;
+    const cy = window.innerHeight * (0.08 + i*0.04);
+    for (let j = 0; j < 3; j++) {
+      ctx.beginPath(); ctx.arc(cx + j*14, cy, 16, 0, Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+// ─── Tile drawing ──────────────────────────────────────────────────────────
+function drawTile(x, y) {
+  const p = worldToScreen(x, y);
+  const t = (state.time % state.dayLen) / state.dayLen;
+  const terr = state.map[y][x];
+  const color = terrainColors(terr, t, x, y);
+  drawDiamond(p.x, p.y, TILE_W * state.zoom, TILE_H * state.zoom, color, 'rgba(0,0,0,0.15)');
+  // Decoration per terrain
+  if (terr === TERRAIN.FOREST) {
+    drawTree(p.x, p.y - 4 * state.zoom, state.zoom);
+  } else if (terr === TERRAIN.STONE) {
+    drawRock(p.x, p.y - 2 * state.zoom, state.zoom);
+  }
+}
+function drawTree(cx, cy, sc) {
+  // Trunk
+  ctx.fillStyle = '#5a3a1e';
+  ctx.fillRect(cx - 2*sc, cy - 4*sc, 4*sc, 10*sc);
+  // Foliage — three overlapping circles
+  ctx.fillStyle = '#3a8a4a';
+  ctx.beginPath(); ctx.arc(cx, cy - 12*sc, 9*sc, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#4aa05a';
+  ctx.beginPath(); ctx.arc(cx - 4*sc, cy - 16*sc, 6*sc, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 4*sc, cy - 14*sc, 7*sc, 0, Math.PI*2); ctx.fill();
+}
+function drawRock(cx, cy, sc) {
+  ctx.fillStyle = '#6e6a74';
+  ctx.beginPath();
+  ctx.moveTo(cx - 10*sc, cy + 2*sc);
+  ctx.lineTo(cx - 8*sc, cy - 6*sc);
+  ctx.lineTo(cx + 2*sc, cy - 8*sc);
+  ctx.lineTo(cx + 8*sc, cy - 2*sc);
+  ctx.lineTo(cx + 6*sc, cy + 4*sc);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#4a464f'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+// ─── Building rendering ────────────────────────────────────────────────────
+function drawBuildingArt(b, cx, cy, sc, ghost = false) {
+  const def = BUILDINGS[b.kind];
+  const wPix = def.w * TILE_W * sc;
+  const hPix = def.h * TILE_H * sc;
+  const alpha = ghost ? 0.5 : 1;
+  ctx.globalAlpha = alpha;
+  // Shadow
+  if (!ghost) {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    drawDiamond(cx, cy + 4*sc, wPix * 0.95, hPix * 0.95, 'rgba(0,0,0,0.3)');
+  }
+  // Foundation
+  ctx.fillStyle = ghost ? '#88dd88' : '#7a5a3a';
+  drawDiamond(cx, cy, wPix, hPix);
+  // Building-specific art
+  if (b.kind === 'TOWN_HALL') {
+    // Tall castle with flag
+    drawWalls(cx, cy, wPix * 0.75, hPix * 0.6, 28*sc, '#c48e5a', '#8a5a3a');
+    // Flag
+    ctx.fillStyle = '#c0392b';
+    ctx.fillRect(cx - 1*sc, cy - 42*sc, 2*sc, 14*sc);
+    ctx.beginPath(); ctx.moveTo(cx+1*sc, cy - 42*sc);
+    ctx.lineTo(cx + 12*sc, cy - 38*sc);
+    ctx.lineTo(cx+1*sc, cy - 34*sc); ctx.closePath(); ctx.fill();
+  } else if (b.kind === 'HOUSE') {
+    drawWalls(cx, cy, wPix * 0.65, hPix * 0.6, 14*sc, '#d4a574', '#8a5a3a');
+    // Door
+    ctx.fillStyle = '#5a3a1e'; ctx.fillRect(cx - 2*sc, cy - 6*sc, 4*sc, 8*sc);
+    // Window
+    ctx.fillStyle = '#f6c56b'; ctx.fillRect(cx + 6*sc, cy - 10*sc, 3*sc, 3*sc);
+  } else if (b.kind === 'LUMBERYARD') {
+    drawWalls(cx, cy, wPix * 0.7, hPix * 0.55, 16*sc, '#a87a4e', '#6a4a2e');
+    // Logs stack
+    ctx.fillStyle = '#6a3a1e';
+    for (let i = 0; i < 3; i++) ctx.fillRect(cx - 18*sc, cy - 2*sc + i*3*sc, 10*sc, 2*sc);
+    // Axe
+    ctx.fillStyle = '#8a8a8a'; ctx.fillRect(cx + 12*sc, cy - 8*sc, 2*sc, 10*sc);
+    ctx.fillStyle = '#aaa'; ctx.fillRect(cx + 10*sc, cy - 10*sc, 6*sc, 3*sc);
+  } else if (b.kind === 'FARM') {
+    // Plowed field pattern
+    const rows = 4;
+    for (let r = 0; r < rows; r++) {
+      const rw = wPix * 0.85;
+      const rh = hPix * 0.85 / rows;
+      ctx.fillStyle = r % 2 === 0 ? '#c08a4a' : '#d8a564';
+      drawDiamond(cx + (r-1.5)*8*sc, cy + (r-1.5)*4*sc, rw * 0.3, rh * 0.6);
+      // Wheat
+      ctx.fillStyle = '#f4d06f';
+      for (let j = 0; j < 4; j++) {
+        ctx.fillRect(cx + (r-1.5)*8*sc - 6*sc + j*3*sc, cy + (r-1.5)*4*sc - 5*sc, 1*sc, 5*sc);
+      }
+    }
+  } else if (b.kind === 'QUARRY') {
+    // Rocky pit
+    ctx.fillStyle = '#4a464f';
+    drawDiamond(cx, cy, wPix * 0.75, hPix * 0.55);
+    for (let i = 0; i < 5; i++) {
+      const rx = cx + (i-2) * 8*sc;
+      const ry = cy + (i-2) * 3*sc;
+      ctx.fillStyle = ['#8a8a8a', '#6a6a6a', '#7a7a7a'][i % 3];
+      ctx.beginPath(); ctx.arc(rx, ry, 4*sc, 0, Math.PI*2); ctx.fill();
+    }
+  } else if (b.kind === 'MARKET') {
+    drawWalls(cx, cy, wPix * 0.6, hPix * 0.55, 10*sc, '#e8b876', '#8a5a3a');
+    // Awning
+    ctx.fillStyle = '#e85a5a';
+    ctx.beginPath();
+    ctx.moveTo(cx - wPix*0.35, cy - 12*sc);
+    ctx.lineTo(cx + wPix*0.35, cy - 12*sc);
+    ctx.lineTo(cx + wPix*0.3, cy - 18*sc);
+    ctx.lineTo(cx - wPix*0.3, cy - 18*sc);
+    ctx.closePath(); ctx.fill();
+    // Coin
+    ctx.fillStyle = '#f6c56b';
+    ctx.beginPath(); ctx.arc(cx, cy - 4*sc, 3*sc, 0, Math.PI*2); ctx.fill();
+  } else if (b.kind === 'WELL') {
+    // Stone base
+    ctx.fillStyle = '#888';
+    ctx.beginPath(); ctx.ellipse(cx, cy - 2*sc, 12*sc, 6*sc, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#4fb3d9';
+    ctx.beginPath(); ctx.ellipse(cx, cy - 3*sc, 9*sc, 4*sc, 0, 0, Math.PI*2); ctx.fill();
+    // Roof
+    ctx.fillStyle = '#8a5a3a';
+    ctx.beginPath();
+    ctx.moveTo(cx - 8*sc, cy - 14*sc);
+    ctx.lineTo(cx, cy - 26*sc);
+    ctx.lineTo(cx + 8*sc, cy - 14*sc);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#5a3a1e'; ctx.fillRect(cx - 1*sc, cy - 14*sc, 2*sc, 12*sc);
+  } else if (b.kind === 'WATCHTOWER') {
+    // Tall thin tower
+    drawWalls(cx, cy, 16*sc, 10*sc, 36*sc, '#b8956a', '#6a4a2e');
+    // Top viewing platform
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx - 10*sc, cy - 40*sc, 20*sc, 4*sc);
+    // Flag
+    ctx.fillStyle = '#4fb3d9';
+    ctx.beginPath(); ctx.moveTo(cx + 1*sc, cy - 44*sc);
+    ctx.lineTo(cx + 8*sc, cy - 42*sc);
+    ctx.lineTo(cx + 1*sc, cy - 40*sc); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#aaa'; ctx.fillRect(cx, cy - 48*sc, 1*sc, 8*sc);
+  }
+  // Construction overlay
+  if (!b.constructed) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#000';
+    drawDiamond(cx, cy, wPix, hPix);
+    ctx.globalAlpha = 1;
+    // Progress arc
+    ctx.strokeStyle = '#f6c56b'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy - 10*sc, 10*sc, -Math.PI/2, -Math.PI/2 + Math.PI*2*b.progress);
+    ctx.stroke();
+    ctx.fillStyle = '#f6c56b'; ctx.font = `bold ${11*sc}px sans-serif`; ctx.textAlign = 'center';
+    ctx.fillText(Math.floor(b.progress * 100) + '%', cx, cy - 6*sc);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawWalls(cx, cy, wallW, wallH, roofH, bodyColor, roofColor) {
+  // Body
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.moveTo(cx - wallW/2, cy);
+  ctx.lineTo(cx - wallW/2, cy - roofH*0.55);
+  ctx.lineTo(cx + wallW/2, cy - roofH*0.55);
+  ctx.lineTo(cx + wallW/2, cy);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+  // Roof (simple peaked)
+  ctx.fillStyle = roofColor;
+  ctx.beginPath();
+  ctx.moveTo(cx - wallW/2 - 2, cy - roofH*0.55);
+  ctx.lineTo(cx, cy - roofH);
+  ctx.lineTo(cx + wallW/2 + 2, cy - roofH*0.55);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.stroke();
+}
+
+// ─── Colonist rendering ────────────────────────────────────────────────────
+function drawColonist(c) {
+  const p = worldToScreen(c.x, c.y);
+  const sc = state.zoom;
+  const bob = Math.sin(state.time * 8 + c.id) * 1.5 * sc;
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 2*sc, 4*sc, 1.5*sc, 0, 0, Math.PI*2); ctx.fill();
+  // Body
+  ctx.fillStyle = c.color || '#6aa8e0';
+  ctx.fillRect(p.x - 3*sc, p.y - 9*sc + bob, 6*sc, 8*sc);
+  // Head
+  ctx.fillStyle = '#f4c7a0';
+  ctx.beginPath(); ctx.arc(p.x, p.y - 12*sc + bob, 3*sc, 0, Math.PI*2); ctx.fill();
+  // Hat (tiny)
+  ctx.fillStyle = '#3a2755';
+  ctx.fillRect(p.x - 3*sc, p.y - 14*sc + bob, 6*sc, 1.5*sc);
+}
+
+// ─── Can place check ──────────────────────────────────────────────────────
+function canPlace(kind, tx, ty) {
+  const def = BUILDINGS[kind];
+  if (!def) return false;
+  for (let dy = 0; dy < def.h; dy++) {
+    for (let dx = 0; dx < def.w; dx++) {
+      const x = tx + dx, y = ty + dy;
+      if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE) return false;
+      const t = state.map[y][x];
+      if (t === TERRAIN.WATER) return false;
+      // Cannot overlap existing building
+      for (const b of state.buildings) {
+        const bd = BUILDINGS[b.kind];
+        if (x >= b.x && x < b.x + bd.w && y >= b.y && y < b.y + bd.h) return false;
+      }
+    }
+  }
+  // Type-specific adjacency rules
+  if (kind === 'QUARRY') {
+    let touchesStone = false;
+    for (let dy = -1; dy <= def.h; dy++)
+      for (let dx = -1; dx <= def.w; dx++) {
+        const x = tx + dx, y = ty + dy;
+        if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE) continue;
+        if (state.map[y][x] === TERRAIN.STONE) touchesStone = true;
+      }
+    if (!touchesStone) return false;
+  }
+  return true;
+}
+function canAfford(kind) {
+  const def = BUILDINGS[kind];
+  for (const res in def.cost) if ((state.resources[res] || 0) < def.cost[res]) return false;
+  return true;
+}
+
+// ─── Place building ───────────────────────────────────────────────────────
+function placeBuilding(kind, tx, ty) {
+  if (!canPlace(kind, tx, ty) || !canAfford(kind)) return false;
+  const def = BUILDINGS[kind];
+  for (const res in def.cost) state.resources[res] -= def.cost[res];
+  const b = { id: state.nextId++, kind, x: tx, y: ty, constructed: false, progress: 0, workers: [] };
+  state.buildings.push(b);
+  if (def.houses) state.capacity.pop += def.houses;
+  toast(`${def.name} placed — colonists will build it.`);
+  return true;
+}
+
+// ─── Update — tick simulation ─────────────────────────────────────────────
+let lastT = performance.now();
+function update(dt) {
+  state.time += dt;
+  // Construct buildings (need nearby colonist OR TownHall's starting crew)
+  for (const b of state.buildings) {
+    if (b.constructed) continue;
+    // Progress on construction. Town Hall completes itself on flat grass.
+    const speed = 0.05 + (state.pop * 0.01);
+    b.progress = Math.min(1, b.progress + dt * speed);
+    if (b.progress >= 1) {
+      b.constructed = true;
+      toast(`${BUILDINGS[b.kind].name} complete!`);
+      // On town hall complete, spawn 3 colonists
+      if (b.kind === 'TOWN_HALL' && state.colonists.length === 0) {
+        for (let i = 0; i < 3; i++) spawnColonist(b);
+      }
+    }
+  }
+  // Recompute capacity from completed houses
+  let cap = 0;
+  for (const b of state.buildings) if (b.constructed && BUILDINGS[b.kind].houses) cap += BUILDINGS[b.kind].houses;
+  state.capacity.pop = cap;
+  // Spawn colonists if we have pop capacity + food
+  const spawnInterval = 8; // sec between spawn attempts
+  if (state.time - (state._lastSpawn || 0) > spawnInterval) {
+    state._lastSpawn = state.time;
+    if (state.pop < state.capacity.pop && state.resources.food >= 5) {
+      const th = state.buildings.find(b => b.kind === 'TOWN_HALL' && b.constructed);
+      if (th) { spawnColonist(th); state.resources.food -= 5; }
+    }
+  }
+  // Update colonists
+  for (const c of state.colonists) updateColonist(c, dt);
+  // Production tick — each constructed production building generates per-sec
+  const perSec = {};
+  for (const b of state.buildings) {
+    if (!b.constructed) continue;
+    const def = BUILDINGS[b.kind];
+    if (!def.produces) continue;
+    // Efficiency = workers assigned / workers needed
+    const eff = def.workers > 0 ? Math.min(1, b.workers.length / def.workers) : 1;
+    // Adjacency bonus (Lumberyard near forest, Farm near water/well)
+    let adj = 1;
+    if (b.kind === 'LUMBERYARD') adj = 0.4 + 0.6 * nearbyCount(b, TERRAIN.FOREST) / 6;
+    if (b.kind === 'FARM') adj = 0.6 + 0.4 * nearbyBuilding(b, 'WELL') * 1.0;
+    if (b.kind === 'MARKET') {
+      // Market consumes 1 food + 1 wood per produced gold
+      const amt = def.rate * eff * dt;
+      if (state.resources.food > amt && state.resources.wood > amt) {
+        state.resources.food -= amt; state.resources.wood -= amt;
+        state.resources.gold += amt;
+        perSec.gold = (perSec.gold || 0) + amt;
+      }
+      continue;
+    }
+    const amt = def.rate * eff * adj * dt;
+    state.resources[def.produces] = (state.resources[def.produces] || 0) + amt;
+    perSec[def.produces] = (perSec[def.produces] || 0) + amt;
+  }
+  // Smooth delta for UI display
+  for (const r in perSec) state.resourceDelta[r] = (state.resourceDelta[r] || 0) * 0.8 + (perSec[r] / dt) * 0.2;
+  // Passive food consumption
+  if (state.pop > 0) {
+    const cost = state.pop * 0.08 * dt;
+    state.resources.food = Math.max(0, state.resources.food - cost);
+  }
+}
+function spawnColonist(fromBuilding) {
+  const c = {
+    id: state.nextId++,
+    x: fromBuilding.x + 0.5, y: fromBuilding.y + 0.5,
+    targetX: fromBuilding.x + 0.5, targetY: fromBuilding.y + 0.5,
+    job: null, building: null, home: fromBuilding,
+    stateTime: 0, cooldown: 0,
+    color: ['#6aa8e0','#d87a5a','#7ce27c','#c088d0','#f6c56b'][state.nextId % 5],
+  };
+  state.colonists.push(c);
+  state.pop++;
+}
+function updateColonist(c, dt) {
+  // Simple "walk to random target" idle behavior for now. Assign job if not working.
+  if (!c.job) {
+    // Find a production building that needs a worker
+    const candidates = state.buildings.filter(b => {
+      if (!b.constructed) return false;
+      const def = BUILDINGS[b.kind];
+      return def.workers && b.workers.length < def.workers;
+    });
+    if (candidates.length > 0) {
+      const b = candidates[Math.floor(Math.random() * candidates.length)];
+      c.job = b.kind; c.building = b; b.workers.push(c);
+      c.targetX = b.x + BUILDINGS[b.kind].w / 2; c.targetY = b.y + BUILDINGS[b.kind].h / 2;
+    } else {
+      // Wander
+      if (c.cooldown <= 0) {
+        c.cooldown = 2 + Math.random() * 4;
+        c.targetX = c.x + (Math.random() - 0.5) * 5;
+        c.targetY = c.y + (Math.random() - 0.5) * 5;
+      }
+      c.cooldown -= dt;
+    }
+  } else {
+    // Worker: bob between building and a random nearby tile (simulating labor)
+    if (c.cooldown <= 0) {
+      c.cooldown = 3 + Math.random() * 2;
+      if (Math.random() < 0.5) {
+        c.targetX = c.building.x + BUILDINGS[c.building.kind].w / 2;
+        c.targetY = c.building.y + BUILDINGS[c.building.kind].h / 2;
+      } else {
+        c.targetX = c.building.x + (Math.random() - 0.5) * 4;
+        c.targetY = c.building.y + (Math.random() - 0.5) * 4;
+      }
+    }
+    c.cooldown -= dt;
+  }
+  // Move toward target
+  const dx = c.targetX - c.x, dy = c.targetY - c.y;
+  const d = Math.hypot(dx, dy);
+  if (d > 0.01) {
+    const speed = 1.5;
+    c.x += (dx / d) * Math.min(speed * dt, d);
+    c.y += (dy / d) * Math.min(speed * dt, d);
+  }
+  // Clamp inside map
+  c.x = Math.max(0, Math.min(MAP_SIZE - 1, c.x));
+  c.y = Math.max(0, Math.min(MAP_SIZE - 1, c.y));
+}
+function nearbyCount(b, terrain) {
+  const def = BUILDINGS[b.kind]; let n = 0;
+  for (let dy = -2; dy <= def.h + 1; dy++)
+    for (let dx = -2; dx <= def.w + 1; dx++) {
+      const x = b.x + dx, y = b.y + dy;
+      if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE) continue;
+      if (state.map[y][x] === terrain) n++;
+    }
+  return n;
+}
+function nearbyBuilding(b, kind) {
+  const def = BUILDINGS[b.kind];
+  for (const other of state.buildings) {
+    if (other === b || other.kind !== kind || !other.constructed) continue;
+    const od = BUILDINGS[other.kind];
+    const overlap =
+      other.x < b.x + def.w + 2 && other.x + od.w + 2 > b.x &&
+      other.y < b.y + def.h + 2 && other.y + od.h + 2 > b.y;
+    if (overlap) return 1;
+  }
+  return 0;
+}
+
+// ─── Render frame ──────────────────────────────────────────────────────────
+function render() {
+  drawSky();
+  // World — back-to-front in painter's order
+  const drawList = [];
+  for (let y = 0; y < MAP_SIZE; y++)
+    for (let x = 0; x < MAP_SIZE; x++)
+      drawList.push({ type: 'tile', x, y, depth: x + y });
+  for (const b of state.buildings) {
+    const def = BUILDINGS[b.kind];
+    drawList.push({ type: 'building', ref: b, x: b.x, y: b.y, depth: (b.x + def.w - 0.5) + (b.y + def.h - 0.5) + 0.3 });
+  }
+  for (const c of state.colonists)
+    drawList.push({ type: 'colonist', ref: c, depth: c.x + c.y + 0.2 });
+  drawList.sort((a, b) => a.depth - b.depth);
+  for (const item of drawList) {
+    if (item.type === 'tile') drawTile(item.x, item.y);
+    else if (item.type === 'building') {
+      const p = worldToScreen(item.x + BUILDINGS[item.ref.kind].w/2 - 0.5,
+                               item.y + BUILDINGS[item.ref.kind].h/2 - 0.5);
+      drawBuildingArt(item.ref, p.x, p.y, state.zoom);
+    }
+    else if (item.type === 'colonist') drawColonist(item.ref);
+  }
+  // Hover preview
+  if (state.selected && state.hoverTile) {
+    const def = BUILDINGS[state.selected];
+    const ok = canPlace(state.selected, state.hoverTile.x, state.hoverTile.y) && canAfford(state.selected);
+    ctx.globalAlpha = 0.55;
+    // Highlight footprint
+    for (let dy = 0; dy < def.h; dy++)
+      for (let dx = 0; dx < def.w; dx++) {
+        const p = worldToScreen(state.hoverTile.x + dx, state.hoverTile.y + dy);
+        drawDiamond(p.x, p.y, TILE_W * state.zoom, TILE_H * state.zoom, ok ? '#7ce27c' : '#e85a5a', '#fff');
+      }
+    ctx.globalAlpha = 1;
+    // Ghost building
+    const g = { kind: state.selected, constructed: true, progress: 1 };
+    const p = worldToScreen(state.hoverTile.x + def.w/2 - 0.5, state.hoverTile.y + def.h/2 - 0.5);
+    drawBuildingArt(g, p.x, p.y, state.zoom, true);
+  }
+  // Selection highlight
+  if (state.selectedEntity && state.selectedEntity.type === 'building') {
+    const b = state.selectedEntity.ref;
+    const def = BUILDINGS[b.kind];
+    const p = worldToScreen(b.x + def.w/2 - 0.5, b.y + def.h/2 - 0.5);
+    ctx.strokeStyle = '#f6c56b'; ctx.lineWidth = 2;
+    const w = def.w * TILE_W * state.zoom, h = def.h * TILE_H * state.zoom;
+    drawDiamond(p.x, p.y, w + 8, h + 8, null, '#f6c56b');
+  }
+  // Minimap
+  renderMiniMap();
+}
+function renderMiniMap() {
+  const mw = miniCanvas.width, mh = miniCanvas.height;
+  miniCtx.fillStyle = '#1a1636';
+  miniCtx.fillRect(0, 0, mw, mh);
+  const sx = mw / MAP_SIZE, sy = mh / MAP_SIZE;
+  for (let y = 0; y < MAP_SIZE; y++)
+    for (let x = 0; x < MAP_SIZE; x++) {
+      const t = state.map[y][x];
+      miniCtx.fillStyle = { 0:'#7bc77b', 1:'#4fb3d9', 2:'#8a8a8a', 3:'#3a8a4a', 4:'#e4cb8a' }[t];
+      miniCtx.fillRect(x * sx, y * sy, Math.ceil(sx), Math.ceil(sy));
+    }
+  miniCtx.fillStyle = '#f6c56b';
+  for (const b of state.buildings) {
+    const d = BUILDINGS[b.kind];
+    miniCtx.fillRect(b.x * sx, b.y * sy, Math.max(2, d.w * sx), Math.max(2, d.h * sy));
+  }
+  miniCtx.fillStyle = '#fff';
+  for (const c of state.colonists) miniCtx.fillRect(c.x * sx, c.y * sy, 1.5, 1.5);
+}
+
+// ─── HUD update ────────────────────────────────────────────────────────────
+const hudEl = document.getElementById('hud');
+function renderHUD() {
+  const resources = [
+    { k: 'food', ico: '🌾' }, { k: 'wood', ico: '🪵' },
+    { k: 'stone', ico: '🪨' }, { k: 'gold', ico: '💰' },
+  ];
+  let html = '';
+  for (const r of resources) {
+    const v = Math.floor(state.resources[r.k] || 0);
+    const d = state.resourceDelta[r.k] || 0;
+    const dStr = d > 0.02 ? `+${d.toFixed(1)}/s` : d < -0.02 ? `${d.toFixed(1)}/s` : '';
+    html += `<div class="resource"><span class="ico">${r.ico}</span><span class="val">${v}</span><span class="delta">${dStr}</span></div>`;
+  }
+  html += `<div class="resource"><span class="ico">👥</span><span class="val">${state.pop}/${state.capacity.pop}</span></div>`;
+  hudEl.innerHTML = html;
+}
+const paletteEl = document.getElementById('palette');
+function renderPalette() {
+  let html = '';
+  for (const k of BUILD_ORDER) {
+    const def = BUILDINGS[k];
+    const afford = canAfford(k);
+    const selected = state.selected === k ? 'selected' : '';
+    const disabled = !afford ? 'disabled' : '';
+    const costStr = Object.entries(def.cost).map(([r, v]) =>
+      `<span class="${state.resources[r] < v ? 'cant' : ''}">${v}${r[0]}</span>`
+    ).join(' ');
+    html += `<button class="build-btn ${selected} ${disabled}" data-kind="${k}">
+      <div class="bico">${def.icon}</div>
+      <div class="bname">${def.name}</div>
+      <div class="bcost">${costStr}</div>
+    </button>`;
+  }
+  paletteEl.innerHTML = html;
+  paletteEl.querySelectorAll('.build-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const k = btn.dataset.kind;
+      if (!canAfford(k)) { toast(`Not enough resources for ${BUILDINGS[k].name}.`); return; }
+      state.selected = state.selected === k ? null : k;
+      state.selectedEntity = null;
+      renderPalette();
+      updateInfo();
+    });
+  });
+}
+const infoEl = document.getElementById('info');
+const infoTitleEl = document.getElementById('info-title');
+const infoBodyEl = document.getElementById('info-body');
+const infoActionEl = document.getElementById('info-action');
+function updateInfo() {
+  if (state.selected) {
+    const def = BUILDINGS[state.selected];
+    infoEl.classList.remove('hidden');
+    infoTitleEl.textContent = `Build ${def.name}`;
+    infoBodyEl.innerHTML = `
+      <div class="row"><span>Size</span><span>${def.w}×${def.h}</span></div>
+      <div class="row"><span>Cost</span><span>${Object.entries(def.cost).map(([r,v])=>`${v} ${r}`).join(', ')}</span></div>
+      ${def.produces ? `<div class="row"><span>Produces</span><span>${def.produces} @ ${def.rate}/s</span></div>` : ''}
+      ${def.workers ? `<div class="row"><span>Workers</span><span>${def.workers}</span></div>` : ''}
+      ${def.houses ? `<div class="row"><span>Houses</span><span>${def.houses}</span></div>` : ''}
+      <div class="tip">${def.desc}</div>
+    `;
+    infoActionEl.style.display = 'none';
+  } else if (state.selectedEntity && state.selectedEntity.type === 'building') {
+    const b = state.selectedEntity.ref;
+    const def = BUILDINGS[b.kind];
+    infoEl.classList.remove('hidden');
+    infoTitleEl.textContent = def.name;
+    infoBodyEl.innerHTML = `
+      <div class="row"><span>Status</span><span>${b.constructed ? 'Active' : `Building ${Math.floor(b.progress*100)}%`}</span></div>
+      ${def.produces ? `<div class="row"><span>Produces</span><span>${def.produces}</span></div>` : ''}
+      ${def.workers ? `<div class="row"><span>Workers</span><span>${b.workers.length}/${def.workers}</span></div>` : ''}
+      ${def.houses ? `<div class="row"><span>Capacity</span><span>${def.houses}</span></div>` : ''}
+      <div class="tip">${def.desc}</div>
+    `;
+    infoActionEl.textContent = 'Demolish (refund 50%)';
+    infoActionEl.style.display = '';
+    infoActionEl.onclick = () => demolish(b);
+  } else {
+    infoEl.classList.add('hidden');
+  }
+}
+function demolish(b) {
+  const def = BUILDINGS[b.kind];
+  for (const r in def.cost) state.resources[r] = (state.resources[r] || 0) + Math.floor(def.cost[r] * 0.5);
+  // Remove workers back to pool
+  for (const c of b.workers) { c.job = null; c.building = null; }
+  state.buildings = state.buildings.filter(x => x !== b);
+  state.selectedEntity = null;
+  toast(`${def.name} demolished.`);
+  updateInfo();
+  save();
+}
+
+// ─── Toast helper ──────────────────────────────────────────────────────────
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2600);
+}
+
+// ─── Input: pan + place + select ──────────────────────────────────────────
+let dragging = false, dragStart = null, dragMoved = false;
+let pinchStart = null;
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  dragging = true; dragMoved = false;
+  dragStart = { x: e.clientX, y: e.clientY, camX: state.camX, camY: state.camY };
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (dragging && dragStart) {
+    const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+    if (Math.hypot(dx, dy) > 5) dragMoved = true;
+    if (dragMoved) { state.camX = dragStart.camX + dx; state.camY = dragStart.camY + dy; }
+  }
+  const w = screenToWorld(e.clientX, e.clientY);
+  if (w.x >= 0 && w.y >= 0 && w.x < MAP_SIZE && w.y < MAP_SIZE) state.hoverTile = w;
+  else state.hoverTile = null;
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (!dragMoved) {
+    const w = screenToWorld(e.clientX, e.clientY);
+    onTap(w);
+  }
+  dragging = false; dragStart = null;
+});
+canvas.addEventListener('pointercancel', () => { dragging = false; dragStart = null; });
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const d = e.deltaY > 0 ? 0.9 : 1.1;
+  state.zoom = Math.max(0.5, Math.min(2.2, state.zoom * d));
+}, { passive: false });
+
+function onTap(w) {
+  if (w.x < 0 || w.y < 0 || w.x >= MAP_SIZE || w.y >= MAP_SIZE) return;
+  if (state.selected) {
+    const ok = placeBuilding(state.selected, w.x, w.y);
+    if (!ok) toast('Can\'t build there.');
+    renderPalette(); updateInfo();
+    save();
+  } else {
+    // Check for building selection
+    for (const b of state.buildings) {
+      const def = BUILDINGS[b.kind];
+      if (w.x >= b.x && w.x < b.x + def.w && w.y >= b.y && w.y < b.y + def.h) {
+        state.selectedEntity = { type: 'building', ref: b };
+        updateInfo();
+        return;
+      }
+    }
+    state.selectedEntity = null;
+    updateInfo();
+  }
+}
+
+// ─── Keyboard shortcuts ────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { state.selected = null; state.selectedEntity = null; renderPalette(); updateInfo(); }
+  const panStep = 30;
+  if (e.key === 'ArrowLeft') state.camX += panStep;
+  if (e.key === 'ArrowRight') state.camX -= panStep;
+  if (e.key === 'ArrowUp') state.camY += panStep;
+  if (e.key === 'ArrowDown') state.camY -= panStep;
+  if (e.key === ' ') { e.preventDefault(); state.paused = !state.paused; }
+  if (e.key >= '1' && e.key <= '8') {
+    const k = BUILD_ORDER[parseInt(e.key, 10) - 1];
+    if (k && canAfford(k)) { state.selected = k; renderPalette(); updateInfo(); }
+  }
+});
+
+// ─── Speed + menu buttons ──────────────────────────────────────────────────
+const speedBtn = document.getElementById('speed-btn');
+speedBtn.addEventListener('click', () => {
+  const steps = [1, 2, 3, 0];
+  const idx = steps.indexOf(state.speed);
+  state.speed = steps[(idx + 1) % steps.length];
+  state.paused = state.speed === 0;
+  speedBtn.textContent = state.paused ? '⏸' : (state.speed + 'x');
+});
+document.getElementById('menu-btn').addEventListener('click', () => {
+  if (confirm('Restart colony? This wipes your progress.')) {
+    localStorage.removeItem('aria-colony-save');
+    location.reload();
+  }
+});
+document.getElementById('welcome-start').addEventListener('click', () => {
+  document.getElementById('welcome').classList.add('hidden');
+  // Pre-select town hall on first run
+  if (state.buildings.length === 0) {
+    state.selected = 'TOWN_HALL';
+    renderPalette();
+    updateInfo();
+    toast('Place your Town Hall near the center.');
+  }
+});
+
+// ─── Save / load ───────────────────────────────────────────────────────────
+function save() {
+  try {
+    const snapshot = {
+      map: state.map, buildings: state.buildings,
+      colonists: state.colonists.map(c => ({ ...c, building: c.building?.id, home: c.home?.id })),
+      resources: state.resources, pop: state.pop, time: state.time, nextId: state.nextId,
+    };
+    localStorage.setItem('aria-colony-save', JSON.stringify(snapshot));
+  } catch {}
+}
+function load() {
+  try {
+    const raw = localStorage.getItem('aria-colony-save');
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    state.map = s.map; state.buildings = s.buildings;
+    state.resources = s.resources; state.pop = s.pop; state.time = s.time; state.nextId = s.nextId;
+    // Re-link colonists to building refs
+    const byId = new Map(state.buildings.map(b => [b.id, b]));
+    state.colonists = s.colonists.map(c => ({ ...c, building: byId.get(c.building) || null, home: byId.get(c.home) || null }));
+    // Re-attach worker refs
+    for (const b of state.buildings) b.workers = state.colonists.filter(c => c.building === b);
+    document.getElementById('welcome').classList.add('hidden');
+    return true;
+  } catch { return false; }
+}
+
+// ─── Main loop ────────────────────────────────────────────────────────────
+function loop(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000) * (state.paused ? 0 : state.speed);
+  lastT = now;
+  update(dt);
+  render();
+  renderHUD();
+  requestAnimationFrame(loop);
+}
+// Init
+if (!load()) {
+  // Center camera on map middle
+  const p = worldToScreen(MAP_SIZE / 2, MAP_SIZE / 2);
+  state.camX -= p.x - window.innerWidth / 2;
+  state.camY -= p.y - window.innerHeight * 0.4;
+}
+renderPalette();
+updateInfo();
+setInterval(save, 10000);
+requestAnimationFrame(loop);
+
+})();
