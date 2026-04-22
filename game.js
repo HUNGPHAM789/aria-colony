@@ -8,6 +8,15 @@ const TILE_W = 64;   // isometric diamond width (pixels)
 const TILE_H = 32;   // isometric diamond height
 const MAP_SIZE = 40; // square map dimension
 const TERRAIN = { GRASS: 0, WATER: 1, STONE: 2, FOREST: 3, SAND: 4 };
+// Per-terrain visual height. Water sits flat (recessed), stone rises the most,
+// grass/forest sit at a middling altitude. Heights are pixels at zoom=1.
+const TERRAIN_HEIGHT = {
+  [TERRAIN.WATER]: 0,
+  [TERRAIN.SAND]: 3,
+  [TERRAIN.GRASS]: 5,
+  [TERRAIN.FOREST]: 5,
+  [TERRAIN.STONE]: 9,
+};
 const BUILDINGS = {
   TOWN_HALL:   { id: 'TOWN_HALL',   name: 'Town Hall',   icon: '🏰', w: 2, h: 2, cost: { wood: 40 },              workers: 0, houses: 3, desc: 'Heart of your colony. Start here.' },
   HOUSE:       { id: 'HOUSE',       name: 'House',       icon: '🏠', w: 1, h: 1, cost: { wood: 20 },              workers: 0, houses: 4, desc: 'Houses 4 colonists.' },
@@ -122,6 +131,109 @@ function drawDiamond(cx, cy, w, h, fill, stroke) {
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
 }
 
+// Darken an rgb(r,g,b) color by a factor (0..1). Used for iso face shading.
+function darkenRgb(rgb, factor) {
+  const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgb);
+  if (!m) return rgb;
+  return `rgb(${Math.floor(+m[1]*factor)},${Math.floor(+m[2]*factor)},${Math.floor(+m[3]*factor)})`;
+}
+
+// Isometric "block" — top diamond plus its two south-facing side faces, which
+// give the ground real depth. Paint order inside the function draws faces
+// first then the top, so faces correctly sit below the top edge.
+function drawTileBlock(cx, cy, w, h, topColor, depth, stroke) {
+  if (depth > 0.5) {
+    // Right face (SE-facing)
+    ctx.fillStyle = darkenRgb(topColor, 0.68);
+    ctx.beginPath();
+    ctx.moveTo(cx + w/2, cy);
+    ctx.lineTo(cx, cy + h/2);
+    ctx.lineTo(cx, cy + h/2 + depth);
+    ctx.lineTo(cx + w/2, cy + depth);
+    ctx.closePath(); ctx.fill();
+    // Left face (SW-facing) — slightly brighter
+    ctx.fillStyle = darkenRgb(topColor, 0.82);
+    ctx.beginPath();
+    ctx.moveTo(cx - w/2, cy);
+    ctx.lineTo(cx, cy + h/2);
+    ctx.lineTo(cx, cy + h/2 + depth);
+    ctx.lineTo(cx - w/2, cy + depth);
+    ctx.closePath(); ctx.fill();
+  }
+  // Top diamond
+  drawDiamond(cx, cy, w, h, topColor, stroke);
+}
+
+function tileHeight(x, y) {
+  if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE) return 0;
+  return TERRAIN_HEIGHT[state.map[y][x]] || 0;
+}
+// Highest tile-height under a building footprint — buildings sit on that crown.
+function buildingTopHeight(b) {
+  const def = BUILDINGS[b.kind];
+  let max = 0;
+  for (let dy = 0; dy < def.h; dy++)
+    for (let dx = 0; dx < def.w; dx++) {
+      max = Math.max(max, tileHeight(b.x + dx, b.y + dy));
+    }
+  return max;
+}
+
+// Water ripple — thin curved lines, offset-animated per tile for a sheen.
+function drawWaterRipple(cx, cy, w, h, tx, ty) {
+  const t = state.time;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - h/2);
+  ctx.lineTo(cx + w/2, cy);
+  ctx.lineTo(cx, cy + h/2);
+  ctx.lineTo(cx - w/2, cy);
+  ctx.closePath();
+  ctx.clip();
+  for (let i = 0; i < 2; i++) {
+    const offset = Math.sin(t * 1.8 + tx*0.7 + ty*0.5 + i * Math.PI) * 2;
+    ctx.strokeStyle = `rgba(200,230,255,${0.12 + 0.08 * Math.sin(t*1.3 + tx + ty)})`;
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - w/2 * 0.6, cy + offset + i * 3);
+    ctx.quadraticCurveTo(cx, cy - 2 + offset + i * 3, cx + w/2 * 0.6, cy + offset + i * 3);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Shore fringe — paint a sand-like band on grass tiles that touch water.
+function maybeDrawShoreFringe(cx, cy, x, y, w, h) {
+  const neigh = [[0,1],[1,0],[0,-1],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  let waterNeighbor = false;
+  for (const [dx, dy] of neigh) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= MAP_SIZE || ny >= MAP_SIZE) continue;
+    if (state.map[ny][nx] === TERRAIN.WATER) { waterNeighbor = true; break; }
+  }
+  if (!waterNeighbor) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - h/2);
+  ctx.lineTo(cx + w/2, cy);
+  ctx.lineTo(cx, cy + h/2);
+  ctx.lineTo(cx - w/2, cy);
+  ctx.closePath();
+  ctx.clip();
+  const grad = ctx.createRadialGradient(cx, cy, w * 0.1, cx, cy, w * 0.7);
+  grad.addColorStop(0, 'rgba(232,206,152,0)');
+  grad.addColorStop(0.6, 'rgba(232,206,152,0)');
+  grad.addColorStop(1, 'rgba(232,206,152,0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(cx - w, cy - h, w*2, h*2);
+  ctx.restore();
+}
+
+// 4 tree variants — deterministic by tile coord so each tree stays consistent.
+function treeVariant(tx, ty) {
+  return (tx * 91 + ty * 37 + (tx ^ ty)) & 3;
+}
+
 function terrainColors(type, timeOfDay, tx, ty) {
   // timeOfDay ∈ [0, 1), 0 = dawn
   const t = timeOfDay;
@@ -194,24 +306,77 @@ function drawTile(x, y) {
   const t = (state.time % state.dayLen) / state.dayLen;
   const terr = state.map[y][x];
   const color = terrainColors(terr, t, x, y);
-  drawDiamond(p.x, p.y, TILE_W * state.zoom, TILE_H * state.zoom, color, 'rgba(0,0,0,0.15)');
-  // Decoration per terrain
+  const tw = TILE_W * state.zoom, th = TILE_H * state.zoom;
+  const depth = tileHeight(x, y) * state.zoom;
+  // Lift top face by the tile's height so stacked blocks shade correctly.
+  const cy = p.y - depth;
+  drawTileBlock(p.x, cy, tw, th, color, depth, 'rgba(0,0,0,0.18)');
+  // Shore fringe on grass adjacent to water
+  if (terr === TERRAIN.GRASS) maybeDrawShoreFringe(p.x, cy, x, y, tw, th);
+  // Decoration per terrain (offset by tile height)
   if (terr === TERRAIN.FOREST) {
-    drawTree(p.x, p.y - 4 * state.zoom, state.zoom);
+    drawTree(p.x, cy - 4 * state.zoom, state.zoom, x, y);
   } else if (terr === TERRAIN.STONE) {
-    drawRock(p.x, p.y - 2 * state.zoom, state.zoom);
+    drawRock(p.x, cy - 2 * state.zoom, state.zoom);
+  } else if (terr === TERRAIN.WATER) {
+    drawWaterRipple(p.x, cy, tw, th, x, y);
   }
 }
-function drawTree(cx, cy, sc) {
-  // Trunk
-  ctx.fillStyle = '#5a3a1e';
-  ctx.fillRect(cx - 2*sc, cy - 4*sc, 4*sc, 10*sc);
-  // Foliage — three overlapping circles
-  ctx.fillStyle = '#3a8a4a';
-  ctx.beginPath(); ctx.arc(cx, cy - 12*sc, 9*sc, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = '#4aa05a';
-  ctx.beginPath(); ctx.arc(cx - 4*sc, cy - 16*sc, 6*sc, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(cx + 4*sc, cy - 14*sc, 7*sc, 0, Math.PI*2); ctx.fill();
+// 4-variant tree — pine tall, pine short, deciduous wide, bushy
+function drawTree(cx, cy, sc, tx, ty) {
+  const v = tx !== undefined ? treeVariant(tx, ty) : 0;
+  const jitter = ((tx * 13 + ty * 17) & 7) - 3; // -3..+4 px x-jitter for variety
+  const jy = ((tx * 7 + ty * 29) & 3) - 1;       // -1..+2 px y
+  cx += jitter * sc * 0.4;
+  cy += jy * sc * 0.3;
+  if (v === 0) {
+    // Tall pine — triangular foliage stacked
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx - 1.5*sc, cy - 3*sc, 3*sc, 10*sc);
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = ['#2e6a3c', '#3a8a4a', '#4aa05a'][i];
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 22*sc + i*6*sc);
+      ctx.lineTo(cx + (7 - i*1.4)*sc, cy - 12*sc + i*5*sc);
+      ctx.lineTo(cx - (7 - i*1.4)*sc, cy - 12*sc + i*5*sc);
+      ctx.closePath(); ctx.fill();
+    }
+  } else if (v === 1) {
+    // Short pine
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx - 1.5*sc, cy - 2*sc, 3*sc, 7*sc);
+    ctx.fillStyle = '#3a8a4a';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 16*sc);
+    ctx.lineTo(cx + 8*sc, cy - 4*sc);
+    ctx.lineTo(cx - 8*sc, cy - 4*sc);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4aa05a';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 11*sc);
+    ctx.lineTo(cx + 6*sc, cy - 1*sc);
+    ctx.lineTo(cx - 6*sc, cy - 1*sc);
+    ctx.closePath(); ctx.fill();
+  } else if (v === 2) {
+    // Wide deciduous — broad oval canopy
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx - 2*sc, cy - 4*sc, 4*sc, 10*sc);
+    ctx.fillStyle = '#2e6a3c';
+    ctx.beginPath(); ctx.ellipse(cx, cy - 12*sc, 11*sc, 9*sc, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#55a55e';
+    ctx.beginPath(); ctx.ellipse(cx - 3*sc, cy - 14*sc, 6*sc, 5*sc, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#74c07e';
+    ctx.beginPath(); ctx.ellipse(cx + 4*sc, cy - 15*sc, 4*sc, 4*sc, 0, 0, Math.PI*2); ctx.fill();
+  } else {
+    // Bushy / scrub
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx - 1.5*sc, cy - 2*sc, 3*sc, 7*sc);
+    ctx.fillStyle = '#3a7a48';
+    ctx.beginPath(); ctx.arc(cx, cy - 8*sc, 6.5*sc, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#4a9052';
+    ctx.beginPath(); ctx.arc(cx - 4*sc, cy - 11*sc, 4*sc, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 4*sc, cy - 10*sc, 4.5*sc, 0, Math.PI*2); ctx.fill();
+  }
 }
 function drawRock(cx, cy, sc) {
   ctx.fillStyle = '#6e6a74';
@@ -233,10 +398,20 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
   const hPix = def.h * TILE_H * sc;
   const alpha = ghost ? 0.5 : 1;
   ctx.globalAlpha = alpha;
-  // Shadow
+  // Soft elliptical drop shadow — radial gradient fades to transparent at
+  // edges so buildings sit on their tile instead of floating.
   if (!ghost) {
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    drawDiamond(cx, cy + 4*sc, wPix * 0.95, hPix * 0.95, 'rgba(0,0,0,0.3)');
+    const sw = wPix * 0.75, sh = hPix * 0.75;
+    ctx.save();
+    const grad = ctx.createRadialGradient(cx, cy + 3*sc, sw * 0.15, cx, cy + 3*sc, sw * 0.85);
+    grad.addColorStop(0, 'rgba(0,0,0,0.5)');
+    grad.addColorStop(0.55, 'rgba(0,0,0,0.25)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + 3*sc, sw, sh * 0.55, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
   }
   // Foundation
   ctx.fillStyle = ghost ? '#88dd88' : '#7a5a3a';
@@ -329,6 +504,32 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
     ctx.lineTo(cx + 1*sc, cy - 40*sc); ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#aaa'; ctx.fillRect(cx, cy - 48*sc, 1*sc, 8*sc);
   }
+  // Night glow — warm window flicker on completed inhabited buildings when
+  // the sun is down. Cheap: a couple shadow-blurred dots per structure.
+  if (!ghost && b.constructed) {
+    const t = (state.time % state.dayLen) / state.dayLen;
+    const dayness = 0.5 + 0.5 * Math.sin((t - 0.25) * Math.PI * 2); // 0 midnight, 1 noon
+    if (dayness < 0.45) {
+      const glow = (0.45 - dayness) / 0.45;  // 0..1 as night deepens
+      ctx.save();
+      ctx.shadowColor = 'rgba(255,190,100,0.85)';
+      ctx.shadowBlur = 12 * sc * glow;
+      ctx.fillStyle = `rgba(255,210,120,${0.65 + 0.3 * glow})`;
+      const flick = 1 + 0.15 * Math.sin(state.time * 4 + b.id);
+      if (b.kind === 'TOWN_HALL') {
+        ctx.fillRect(cx - 4*sc, cy - 16*sc, 3*sc * flick, 3*sc);
+        ctx.fillRect(cx + 2*sc, cy - 16*sc, 3*sc * flick, 3*sc);
+      } else if (b.kind === 'HOUSE' || b.kind === 'MARKET') {
+        ctx.fillRect(cx + 5*sc, cy - 10*sc, 3*sc * flick, 3*sc);
+      } else if (b.kind === 'WATCHTOWER') {
+        ctx.fillRect(cx - 3*sc, cy - 38*sc, 2*sc, 2*sc);
+        ctx.fillRect(cx + 1*sc, cy - 38*sc, 2*sc, 2*sc);
+      } else if (b.kind === 'LUMBERYARD' || b.kind === 'FARM') {
+        ctx.fillRect(cx - 6*sc, cy - 8*sc, 2.5*sc * flick, 2.5*sc);
+      }
+      ctx.restore();
+    }
+  }
   // Construction overlay
   if (!b.constructed) {
     ctx.globalAlpha = 0.6;
@@ -369,6 +570,9 @@ function drawWalls(cx, cy, wallW, wallH, roofH, bodyColor, roofColor) {
 function drawColonist(c) {
   const p = worldToScreen(c.x, c.y);
   const sc = state.zoom;
+  // Lift the colonist onto whatever tile they're standing on.
+  const lift = tileHeight(Math.floor(c.x), Math.floor(c.y)) * sc;
+  p.y -= lift;
   const bob = Math.sin(state.time * 8 + c.id) * 1.5 * sc;
   // Shadow
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
@@ -601,9 +805,10 @@ function render() {
   for (const item of drawList) {
     if (item.type === 'tile') drawTile(item.x, item.y);
     else if (item.type === 'building') {
-      const p = worldToScreen(item.x + BUILDINGS[item.ref.kind].w/2 - 0.5,
-                               item.y + BUILDINGS[item.ref.kind].h/2 - 0.5);
-      drawBuildingArt(item.ref, p.x, p.y, state.zoom);
+      const def = BUILDINGS[item.ref.kind];
+      const p = worldToScreen(item.x + def.w/2 - 0.5, item.y + def.h/2 - 0.5);
+      const lift = buildingTopHeight(item.ref) * state.zoom;
+      drawBuildingArt(item.ref, p.x, p.y - lift, state.zoom);
     }
     else if (item.type === 'colonist') drawColonist(item.ref);
   }
@@ -612,26 +817,50 @@ function render() {
     const def = BUILDINGS[state.selected];
     const ok = canPlace(state.selected, state.hoverTile.x, state.hoverTile.y) && canAfford(state.selected);
     ctx.globalAlpha = 0.55;
-    // Highlight footprint
+    // Highlight footprint — lifted onto each tile's height
     for (let dy = 0; dy < def.h; dy++)
       for (let dx = 0; dx < def.w; dx++) {
-        const p = worldToScreen(state.hoverTile.x + dx, state.hoverTile.y + dy);
-        drawDiamond(p.x, p.y, TILE_W * state.zoom, TILE_H * state.zoom, ok ? '#7ce27c' : '#e85a5a', '#fff');
+        const tx = state.hoverTile.x + dx, ty = state.hoverTile.y + dy;
+        const p = worldToScreen(tx, ty);
+        const lift = tileHeight(tx, ty) * state.zoom;
+        drawDiamond(p.x, p.y - lift, TILE_W * state.zoom, TILE_H * state.zoom, ok ? '#7ce27c' : '#e85a5a', '#fff');
       }
     ctx.globalAlpha = 1;
     // Ghost building
-    const g = { kind: state.selected, constructed: true, progress: 1 };
+    const g = { id: -1, kind: state.selected, constructed: true, progress: 1, x: state.hoverTile.x, y: state.hoverTile.y };
     const p = worldToScreen(state.hoverTile.x + def.w/2 - 0.5, state.hoverTile.y + def.h/2 - 0.5);
-    drawBuildingArt(g, p.x, p.y, state.zoom, true);
+    const lift = buildingTopHeight(g) * state.zoom;
+    drawBuildingArt(g, p.x, p.y - lift, state.zoom, true);
   }
   // Selection highlight
   if (state.selectedEntity && state.selectedEntity.type === 'building') {
     const b = state.selectedEntity.ref;
     const def = BUILDINGS[b.kind];
     const p = worldToScreen(b.x + def.w/2 - 0.5, b.y + def.h/2 - 0.5);
+    const lift = buildingTopHeight(b) * state.zoom;
     ctx.strokeStyle = '#f6c56b'; ctx.lineWidth = 2;
     const w = def.w * TILE_W * state.zoom, h = def.h * TILE_H * state.zoom;
-    drawDiamond(p.x, p.y, w + 8, h + 8, null, '#f6c56b');
+    drawDiamond(p.x, p.y - lift, w + 8, h + 8, null, '#f6c56b');
+  }
+  // Dawn/dusk color grade — one full-screen multiply pass tints the whole world
+  // warm orange at dawn, purple at dusk, cool blue at night.
+  {
+    const tt = (state.time % state.dayLen) / state.dayLen;
+    let overlayColor = null, alpha = 0;
+    if (tt < 0.1) { overlayColor = 'rgb(255,180,120)'; alpha = 0.18; }          // dawn
+    else if (tt < 0.15) { overlayColor = 'rgb(255,210,160)'; alpha = 0.10; }    // late dawn
+    else if (tt < 0.55) { overlayColor = null; }                                 // day — no tint
+    else if (tt < 0.65) { overlayColor = 'rgb(255,160,120)'; alpha = 0.12; }    // early dusk
+    else if (tt < 0.75) { overlayColor = 'rgb(130,100,180)'; alpha = 0.22; }    // dusk
+    else { overlayColor = 'rgb(60,70,130)'; alpha = 0.28; }                      // night
+    if (overlayColor && alpha > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = overlayColor;
+      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+      ctx.restore();
+    }
   }
   // Minimap
   renderMiniMap();
