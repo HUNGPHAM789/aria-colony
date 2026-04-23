@@ -52,6 +52,12 @@ const state = {
   speed: 1,
   paused: false,
   nextId: 1,
+  // Global tick counter (OpenRCT2 + OpenTTD pattern). One int drives every
+  // animation: water shimmer, smoke, selection pulse, banner wave.
+  tick: 0,
+  // Weather — slow-varying ambient. 0 = clear, 1 = light rain, 2 = heavy rain.
+  weather: 0,
+  weatherChangeAt: 0,
 };
 
 // ─── Device pixel ratio resize ──────────────────────────────────────────────
@@ -832,38 +838,87 @@ function render() {
     const lift = buildingTopHeight(g) * state.zoom;
     drawBuildingArt(g, p.x, p.y - lift, state.zoom, true);
   }
-  // Selection highlight
+  // Selection highlight — pulsing (OpenTTD PALETTE_TILE_RED_PULSATING port).
   if (state.selectedEntity && state.selectedEntity.type === 'building') {
     const b = state.selectedEntity.ref;
     const def = BUILDINGS[b.kind];
     const p = worldToScreen(b.x + def.w/2 - 0.5, b.y + def.h/2 - 0.5);
     const lift = buildingTopHeight(b) * state.zoom;
-    ctx.strokeStyle = '#f6c56b'; ctx.lineWidth = 2;
+    const pulse = 0.55 + 0.45 * Math.sin(state.tick * 0.12);
+    ctx.strokeStyle = `rgba(246,197,107,${pulse})`;
+    ctx.lineWidth = 2;
     const w = def.w * TILE_W * state.zoom, h = def.h * TILE_H * state.zoom;
-    drawDiamond(p.x, p.y - lift, w + 8, h + 8, null, '#f6c56b');
+    drawDiamond(p.x, p.y - lift, w + 8, h + 8, null, `rgba(246,197,107,${pulse})`);
   }
-  // Dawn/dusk color grade — one full-screen multiply pass tints the whole world
-  // warm orange at dawn, purple at dusk, cool blue at night.
+  // Dawn/dusk color grade — port of OpenRCT2's LightFX.cpp asymmetric R/G/B
+  // curve so nights go BLUE (not gray). Built around "dayness" ∈ [0,1] where
+  // 1 = noon, 0 = midnight. Separate power curves per channel give the warm
+  // dawn/dusk crossover without lookup tables.
   {
     const tt = (state.time % state.dayLen) / state.dayLen;
-    let overlayColor = null, alpha = 0;
-    if (tt < 0.1) { overlayColor = 'rgb(255,180,120)'; alpha = 0.18; }          // dawn
-    else if (tt < 0.15) { overlayColor = 'rgb(255,210,160)'; alpha = 0.10; }    // late dawn
-    else if (tt < 0.55) { overlayColor = null; }                                 // day — no tint
-    else if (tt < 0.65) { overlayColor = 'rgb(255,160,120)'; alpha = 0.12; }    // early dusk
-    else if (tt < 0.75) { overlayColor = 'rgb(130,100,180)'; alpha = 0.22; }    // dusk
-    else { overlayColor = 'rgb(60,70,130)'; alpha = 0.28; }                      // night
-    if (overlayColor && alpha > 0) {
+    // dayness: 1 at noon (tt=0.25→0.5? our convention tt=0 is midnight)
+    // Existing code uses tt=0 as dawn, tt=0.5 as dusk-ish. Remap to a sine:
+    const dayness = 0.5 + 0.5 * Math.sin((tt - 0.25) * Math.PI * 2);
+    if (dayness < 0.95) {
+      const night = Math.pow(1 - dayness, 1.5); // 0 day → 1 midnight
+      // Asymmetric channel curves (OpenRCT2 LightFX.cpp:842-940 adapted):
+      const r = Math.floor(255 * (1 - night * 0.78));           // strongest drop
+      const g = Math.floor(255 * (1 - night * 0.65));           // middle
+      const b = Math.floor(255 * (1 - night * 0.38));           // keeps blue alive
+      // Add warm skew near dawn/dusk when sun is near horizon.
+      const horizon = Math.max(0, 1 - Math.abs(dayness - 0.18) * 10) + Math.max(0, 1 - Math.abs(dayness - 0.12) * 10);
+      const rWarm = Math.min(255, r + Math.floor(40 * horizon));
+      const gWarm = Math.min(255, g + Math.floor(20 * horizon));
       ctx.save();
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = overlayColor;
+      ctx.globalAlpha = 0.85 * night + 0.15 * horizon;
+      ctx.fillStyle = `rgb(${rWarm},${gWarm},${b})`;
       ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
       ctx.restore();
     }
   }
+  // Weather overlay — rain streak pattern offset by tick (OpenRCT2
+  // WeatherDrawer.cpp:84-198). No particle state; one draw per layer.
+  if (state.weather > 0) {
+    drawWeatherOverlay();
+  }
   // Minimap
   renderMiniMap();
+}
+
+// Cached rain pattern — built once, offset-drawn per frame.
+let _rainPattern = null;
+function getRainPattern() {
+  if (_rainPattern) return _rainPattern;
+  const c = document.createElement('canvas');
+  c.width = 120; c.height = 120;
+  const cc = c.getContext('2d');
+  cc.strokeStyle = 'rgba(180,210,255,0.55)';
+  cc.lineWidth = 1;
+  for (let i = 0; i < 30; i++) {
+    const x = Math.random() * 120;
+    const y = Math.random() * 120;
+    cc.beginPath();
+    cc.moveTo(x, y);
+    cc.lineTo(x - 4, y + 12);
+    cc.stroke();
+  }
+  _rainPattern = ctx.createPattern(c, 'repeat');
+  return _rainPattern;
+}
+function drawWeatherOverlay() {
+  const heavy = state.weather >= 2;
+  const layers = heavy ? 3 : 1;
+  const pat = getRainPattern();
+  for (let i = 0; i < layers; i++) {
+    ctx.save();
+    const ox = -(state.tick * (4 + i)) % 120;
+    const oy = -(state.tick * (12 + i * 2)) % 120;
+    ctx.translate(ox, oy);
+    ctx.fillStyle = pat;
+    ctx.fillRect(-ox, -oy, window.innerWidth + 120, window.innerHeight + 120);
+    ctx.restore();
+  }
 }
 function renderMiniMap() {
   const mw = miniCanvas.width, mh = miniCanvas.height;
@@ -1096,6 +1151,50 @@ function save() {
     localStorage.setItem('aria-colony-save', JSON.stringify(snapshot));
   } catch {}
 }
+
+// URL-hash-encoded map share (isocity pattern, ported). Encodes just the
+// map terrain so anyone can open a URL and see your starting landscape.
+// Full save (buildings + colonists) stays in localStorage.
+function encodeMapToHash() {
+  try {
+    const u8 = new Uint8Array(MAP_SIZE * MAP_SIZE);
+    for (let y = 0; y < MAP_SIZE; y++)
+      for (let x = 0; x < MAP_SIZE; x++) u8[y * MAP_SIZE + x] = state.map[y][x] & 0xff;
+    // base64url
+    let bin = ''; for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return b64;
+  } catch { return ''; }
+}
+function decodeMapFromHash(hash) {
+  try {
+    const b64 = hash.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = '='.repeat((4 - b64.length % 4) % 4);
+    const bin = atob(b64 + pad);
+    if (bin.length !== MAP_SIZE * MAP_SIZE) return null;
+    const m = [];
+    for (let y = 0; y < MAP_SIZE; y++) {
+      m[y] = [];
+      for (let x = 0; x < MAP_SIZE; x++) m[y][x] = bin.charCodeAt(y * MAP_SIZE + x);
+    }
+    return m;
+  } catch { return null; }
+}
+function updateHashState() {
+  try { history.replaceState(null, '', '#' + encodeMapToHash()); } catch {}
+}
+window.addEventListener('popstate', () => {
+  const h = location.hash.slice(1);
+  if (!h) return;
+  const m = decodeMapFromHash(h);
+  if (m) {
+    state.map = m;
+    state.buildings = []; state.colonists = []; state.pop = 0;
+    state.resources = { food: 20, wood: 60, stone: 15, gold: 0 };
+    state.selected = null; state.selectedEntity = null;
+    toast('Loaded shared map from URL.');
+  }
+});
 function load() {
   try {
     const raw = localStorage.getItem('aria-colony-save');
@@ -1117,21 +1216,39 @@ function load() {
 function loop(now) {
   const dt = Math.min(0.1, (now - lastT) / 1000) * (state.paused ? 0 : state.speed);
   lastT = now;
+  // Global tick drives all animation. One int, shared across systems.
+  state.tick = (state.tick + 1) >>> 0;
+  // Cycle weather — chance to flip every ~30s of real time.
+  if (state.tick > state.weatherChangeAt) {
+    state.weatherChangeAt = state.tick + 1200 + ((state.tick * 131) & 1023); // ~20-40s @ 60fps
+    const r = Math.random();
+    state.weather = r < 0.65 ? 0 : r < 0.92 ? 1 : 2;
+  }
   update(dt);
   render();
   renderHUD();
   requestAnimationFrame(loop);
 }
-// Init
-if (!load()) {
+// Init — precedence: URL hash (shared map) > localStorage save > fresh gen.
+const hashArg = location.hash.slice(1);
+let loadedFromHash = false;
+if (hashArg) {
+  const m = decodeMapFromHash(hashArg);
+  if (m) { state.map = m; loadedFromHash = true; toast('Loaded shared map from URL.'); }
+}
+if (!loadedFromHash && !load()) {
   // Center camera on map middle
   const p = worldToScreen(MAP_SIZE / 2, MAP_SIZE / 2);
   state.camX -= p.x - window.innerWidth / 2;
   state.camY -= p.y - window.innerHeight * 0.4;
+  // First-run: share the generated map as a URL people can copy.
+  updateHashState();
 }
 renderPalette();
 updateInfo();
 setInterval(save, 10000);
+// Keep hash in sync with any map-changing action so copy-and-share always works.
+setInterval(updateHashState, 5000);
 requestAnimationFrame(loop);
 
 })();
