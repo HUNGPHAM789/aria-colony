@@ -1093,11 +1093,14 @@ function drawWeatherOverlay() {
   const pat = getRainPattern();
   for (let i = 0; i < layers; i++) {
     ctx.save();
-    const ox = -(state.tick * (4 + i)) % 120;
-    const oy = -(state.tick * (12 + i * 2)) % 120;
+    // Positive shift → pattern scrolls DOWN and slightly LEFT with the
+    // streak angle, so drops appear to fall. Earlier negative values made
+    // rain fly upward. Modulo keeps translate small to avoid precision drift.
+    const ox = -((state.tick * (2 + i)) % 120);
+    const oy =  ((state.tick * (14 + i * 3)) % 120);
     ctx.translate(ox, oy);
     ctx.fillStyle = pat;
-    ctx.fillRect(-ox, -oy, window.innerWidth + 120, window.innerHeight + 120);
+    ctx.fillRect(-ox - 120, -oy - 120, window.innerWidth + 240, window.innerHeight + 240);
     ctx.restore();
   }
 }
@@ -1404,11 +1407,19 @@ function loop(now) {
   lastT = now;
   // Global tick drives all animation. One int, shared across systems.
   state.tick = (state.tick + 1) >>> 0;
-  // Cycle weather — chance to flip every ~30s of real time.
+  // Weather cycle — longer clear stretches than rainy ones so rain feels
+  // like an occasional event, not the default mood. Clear is the rest state.
   if (state.tick > state.weatherChangeAt) {
-    state.weatherChangeAt = state.tick + 1200 + ((state.tick * 131) & 1023); // ~20-40s @ 60fps
-    const r = Math.random();
-    state.weather = r < 0.65 ? 0 : r < 0.92 ? 1 : 2;
+    const roll = Math.random();
+    if (state.weather === 0) {
+      // Currently clear — mostly stay clear; small chance to roll into rain.
+      state.weather = roll < 0.82 ? 0 : roll < 0.96 ? 1 : 2;
+      state.weatherChangeAt = state.tick + 3600 + ((state.tick * 131) & 2047); // ~1–1.5 min clear
+    } else {
+      // Currently raining — always revert to clear on the next tick.
+      state.weather = 0;
+      state.weatherChangeAt = state.tick + 1800 + ((state.tick * 131) & 1023); // ~30–50s rain
+    }
   }
   update(dt);
   render();
