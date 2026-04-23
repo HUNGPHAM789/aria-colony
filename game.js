@@ -516,16 +516,28 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
   // Foundation
   ctx.fillStyle = ghost ? '#88dd88' : '#7a5a3a';
   drawDiamond(cx, cy, wPix, hPix);
+  // Per-building wind phase so flags on adjacent buildings don't wave in lockstep.
+  const windPhase = state.tick * 0.18 + (b.id || 0);
+  const flagWave = Math.sin(windPhase) * 2.5 * sc;   // tip x offset
+  const flagCurl = Math.sin(windPhase * 1.3) * 1.2 * sc; // mid y curve
   // Building-specific art
   if (b.kind === 'TOWN_HALL') {
     // Tall castle with flag
     drawWalls(cx, cy, wPix * 0.75, hPix * 0.6, 28*sc, '#c48e5a', '#8a5a3a');
-    // Flag
+    // Flag — pole + triangular banner that waves with the wind.
     ctx.fillStyle = '#c0392b';
     ctx.fillRect(cx - 1*sc, cy - 42*sc, 2*sc, 14*sc);
-    ctx.beginPath(); ctx.moveTo(cx+1*sc, cy - 42*sc);
-    ctx.lineTo(cx + 12*sc, cy - 38*sc);
-    ctx.lineTo(cx+1*sc, cy - 34*sc); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + 1*sc, cy - 42*sc);
+    ctx.quadraticCurveTo(
+      cx + 6*sc + flagWave, cy - 38*sc + flagCurl,
+      cx + 12*sc + flagWave, cy - 38*sc
+    );
+    ctx.quadraticCurveTo(
+      cx + 6*sc + flagWave, cy - 34*sc + flagCurl,
+      cx + 1*sc, cy - 34*sc
+    );
+    ctx.closePath(); ctx.fill();
   } else if (b.kind === 'HOUSE') {
     drawWalls(cx, cy, wPix * 0.65, hPix * 0.6, 14*sc, '#d4a574', '#8a5a3a');
     // Door
@@ -597,11 +609,19 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
     // Top viewing platform
     ctx.fillStyle = '#8a5a3a';
     ctx.fillRect(cx - 10*sc, cy - 40*sc, 20*sc, 4*sc);
-    // Flag
+    // Waving flag — quadratic curve so the banner billows instead of rigid tri.
     ctx.fillStyle = '#4fb3d9';
-    ctx.beginPath(); ctx.moveTo(cx + 1*sc, cy - 44*sc);
-    ctx.lineTo(cx + 8*sc, cy - 42*sc);
-    ctx.lineTo(cx + 1*sc, cy - 40*sc); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + 1*sc, cy - 44*sc);
+    ctx.quadraticCurveTo(
+      cx + 4*sc + flagWave * 0.7, cy - 43*sc + flagCurl * 0.7,
+      cx + 8*sc + flagWave * 0.7, cy - 42*sc
+    );
+    ctx.quadraticCurveTo(
+      cx + 4*sc + flagWave * 0.7, cy - 41*sc + flagCurl * 0.7,
+      cx + 1*sc, cy - 40*sc
+    );
+    ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#aaa'; ctx.fillRect(cx, cy - 48*sc, 1*sc, 8*sc);
   }
   // Night glow — warm window flicker on completed inhabited buildings when
@@ -630,12 +650,48 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
       ctx.restore();
     }
   }
+  // Chimney smoke — constant rising puffs on completed inhabited buildings.
+  // Each puff lives `lifetime` frames; 5 staggered puffs give a continuous
+  // plume. Time-of-day modulates output (fires burn hotter at night).
+  if (!ghost && b.constructed && CHIMNEY_SPOTS[b.kind]) {
+    const spot = CHIMNEY_SPOTS[b.kind];
+    const chx = cx + spot[0] * sc;
+    const chy = cy + spot[1] * sc;
+    const t = (state.time % state.dayLen) / state.dayLen;
+    const dayness = 0.5 + 0.5 * Math.sin((t - 0.25) * Math.PI * 2);
+    const nightBoost = 0.6 + 0.4 * (1 - dayness); // warmer at night
+    const lifetime = 120;
+    for (let i = 0; i < 5; i++) {
+      const age = (state.tick + (b.id || 0) * 11 + i * 24) % lifetime;
+      const phase = age / lifetime;
+      const rise = phase * 26 * sc;
+      const drift = Math.sin(phase * Math.PI * 2 + (b.id || 0)) * 2.5 * sc;
+      const alpha = (1 - phase) * 0.38 * nightBoost;
+      const radius = (1.2 + phase * 2.4) * sc;
+      ctx.fillStyle = `rgba(210,210,215,${alpha})`;
+      ctx.beginPath();
+      ctx.arc(chx + drift, chy - rise, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   // Construction overlay
   if (!b.constructed) {
     ctx.globalAlpha = 0.6;
     ctx.fillStyle = '#000';
     drawDiamond(cx, cy, wPix, hPix);
     ctx.globalAlpha = 1;
+    // Construction dust — 3 tan orbs orbiting the progress arc, implying
+    // active work. Faster orbit when progress is higher (more workers).
+    const orbitSpeed = 0.05 + b.progress * 0.08;
+    for (let i = 0; i < 3; i++) {
+      const a = state.tick * orbitSpeed + (i * Math.PI * 2 / 3);
+      const dx = Math.cos(a) * 14 * sc;
+      const dy = Math.sin(a) * 6 * sc; // squashed for iso perspective
+      ctx.fillStyle = `rgba(222,190,140,${0.55 + 0.35 * Math.sin(a * 2)})`;
+      ctx.beginPath();
+      ctx.arc(cx + dx, cy - 6*sc + dy, 2 * sc, 0, Math.PI * 2);
+      ctx.fill();
+    }
     // Progress arc
     ctx.strokeStyle = '#f6c56b'; ctx.lineWidth = 3;
     ctx.beginPath();
@@ -646,6 +702,13 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
   }
   ctx.globalAlpha = 1;
 }
+// Relative chimney positions per building kind. null = no smoke.
+const CHIMNEY_SPOTS = {
+  HOUSE:      [6, -16],
+  TOWN_HALL:  [-8, -22],
+  LUMBERYARD: [-10, -14],
+  MARKET:     [-8, -16],
+};
 function drawWalls(cx, cy, wallW, wallH, roofH, bodyColor, roofColor) {
   // Body
   ctx.fillStyle = bodyColor;
