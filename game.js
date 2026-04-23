@@ -349,6 +349,55 @@ function drawSky() {
   }
 }
 
+// Unciv-style edge blending — for each cardinal neighbor with different
+// terrain, paint a soft gradient from that edge inward using the neighbor's
+// color. Cheap substitute for a 20-way edge-sprite sheet; gives the same
+// "biomes bleed into each other" look without needing art assets.
+const EDGE_BLEND_RGB = {
+  [TERRAIN.GRASS]:  [125, 195, 100],
+  [TERRAIN.FOREST]: [58,  138, 74],
+  [TERRAIN.STONE]:  [138, 138, 138],
+  [TERRAIN.WATER]:  [80,  170, 210],
+  [TERRAIN.SAND]:   [222, 200, 150],
+};
+// Edge midpoint offsets (screen-space) for each cardinal neighbor, plus the
+// neighbor's tile-coord delta. Names are compass directions in iso view.
+const EDGE_DIRS = [
+  { dx:  0, dy: -1, ex:  0.25, ey: -0.25 }, // NE — neighbor (x, y-1)
+  { dx:  1, dy:  0, ex:  0.25, ey:  0.25 }, // SE — neighbor (x+1, y)
+  { dx:  0, dy:  1, ex: -0.25, ey:  0.25 }, // SW — neighbor (x, y+1)
+  { dx: -1, dy:  0, ex: -0.25, ey: -0.25 }, // NW — neighbor (x-1, y)
+];
+function drawEdgeBlends(cx, cy, x, y, w, h) {
+  const myT = state.map[y][x];
+  for (const d of EDGE_DIRS) {
+    const nx = x + d.dx, ny = y + d.dy;
+    if (nx < 0 || ny < 0 || nx >= MAP_SIZE || ny >= MAP_SIZE) continue;
+    const nt = state.map[ny][nx];
+    if (nt === myT) continue;
+    const c = EDGE_BLEND_RGB[nt];
+    if (!c) continue;
+    // Water blends strongest (most visible), stone weakest so rocky transitions
+    // stay crisp. Tuned by eye.
+    const alpha = nt === TERRAIN.WATER ? 0.55 : nt === TERRAIN.STONE ? 0.35 : 0.45;
+    const mx = cx + d.ex * w, my = cy + d.ey * h;
+    const grad = ctx.createLinearGradient(mx, my, cx, cy);
+    grad.addColorStop(0,    `rgba(${c[0]},${c[1]},${c[2]},${alpha})`);
+    grad.addColorStop(0.85, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - h/2);
+    ctx.lineTo(cx + w/2, cy);
+    ctx.lineTo(cx, cy + h/2);
+    ctx.lineTo(cx - w/2, cy);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = grad;
+    ctx.fillRect(cx - w, cy - h, w*2, h*2);
+    ctx.restore();
+  }
+}
+
 // ─── Tile drawing ──────────────────────────────────────────────────────────
 function drawTile(x, y) {
   const p = worldToScreen(x, y);
@@ -360,7 +409,9 @@ function drawTile(x, y) {
   // Lift top face by the tile's height so stacked blocks shade correctly.
   const cy = p.y - depth;
   drawTileBlock(p.x, cy, tw, th, color, depth, 'rgba(0,0,0,0.18)');
-  // Shore fringe on grass adjacent to water
+  // Edge blending — biomes bleed softly into each other at transitions.
+  drawEdgeBlends(p.x, cy, x, y, tw, th);
+  // Shore fringe on grass adjacent to water (sand-like band layered over blend)
   if (terr === TERRAIN.GRASS) maybeDrawShoreFringe(p.x, cy, x, y, tw, th);
   // Decoration per terrain (offset by tile height)
   if (terr === TERRAIN.FOREST) {
