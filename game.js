@@ -31,7 +31,17 @@ const BUILD_ORDER = ['TOWN_HALL', 'HOUSE', 'LUMBERYARD', 'FARM', 'QUARRY', 'MARK
 
 // ─── Canvas + world state ───────────────────────────────────────────────────
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+// `ctx` is `let` (not const) so renderWorld() can swap it for the offscreen
+// world canvas during terrain bake. Every draw fn reads the live `ctx`, so
+// this swap redirects the whole call-tree without per-fn plumbing.
+let ctx = canvas.getContext('2d');
+const mainCtx = ctx;
+// Offscreen world cache — terrain + trees + rocks + shore fringe bake here.
+// Only redrawn when `state.worldDirty` is set. Every frame we blit it to the
+// main canvas, then draw dynamics (buildings, colonists, effects) on top.
+// Buildings stay out of the cache so colonists z-sort correctly against them.
+const worldCanvas = document.createElement('canvas');
+const worldCtx = worldCanvas.getContext('2d');
 const miniCanvas = document.querySelector('#minimap canvas');
 const miniCtx = miniCanvas.getContext('2d');
 
@@ -58,16 +68,29 @@ const state = {
   // Weather — slow-varying ambient. 0 = clear, 1 = light rain, 2 = heavy rain.
   weather: 0,
   weatherChangeAt: 0,
+  // Dual-canvas bookkeeping. Any change to the static world — pan, zoom, map
+  // edit, build, demolish, resize — flips this so renderWorld() runs once on
+  // the next frame to rebake the terrain cache.
+  worldDirty: true,
 };
+function markWorldDirty() { state.worldDirty = true; }
 
 // ─── Device pixel ratio resize ──────────────────────────────────────────────
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(window.innerWidth * dpr);
-  canvas.height = Math.floor(window.innerHeight * dpr);
+  const w = Math.floor(window.innerWidth * dpr);
+  const h = Math.floor(window.innerHeight * dpr);
+  canvas.width = w;
+  canvas.height = h;
   canvas.style.width = window.innerWidth + 'px';
   canvas.style.height = window.innerHeight + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Offscreen world cache shares the viewport dimensions. Transform in CSS
+  // pixels just like the main context — worldToScreen stays coordinate-compatible.
+  worldCanvas.width = w;
+  worldCanvas.height = h;
+  worldCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  markWorldDirty();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -185,9 +208,9 @@ function buildingTopHeight(b) {
   return max;
 }
 
-// Water ripple — thin curved lines, offset-animated per tile for a sheen.
+// Static water ripple — deterministic per-tile detail baked into world cache.
+// Animated sheen is a separate pass (see drawWaterSheen) on the main canvas.
 function drawWaterRipple(cx, cy, w, h, tx, ty) {
-  const t = state.time;
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(cx, cy - h/2);
@@ -197,14 +220,39 @@ function drawWaterRipple(cx, cy, w, h, tx, ty) {
   ctx.closePath();
   ctx.clip();
   for (let i = 0; i < 2; i++) {
-    const offset = Math.sin(t * 1.8 + tx*0.7 + ty*0.5 + i * Math.PI) * 2;
-    ctx.strokeStyle = `rgba(200,230,255,${0.12 + 0.08 * Math.sin(t*1.3 + tx + ty)})`;
+    const offset = Math.sin(tx * 0.7 + ty * 0.5 + i * Math.PI) * 2;
+    ctx.strokeStyle = `rgba(200,230,255,${0.12 + 0.08 * Math.sin(tx + ty)})`;
     ctx.lineWidth = 0.8;
     ctx.beginPath();
     ctx.moveTo(cx - w/2 * 0.6, cy + offset + i * 3);
     ctx.quadraticCurveTo(cx, cy - 2 + offset + i * 3, cx + w/2 * 0.6, cy + offset + i * 3);
     ctx.stroke();
   }
+  ctx.restore();
+}
+// Animated water sheen — per-frame pass on the main canvas. One thin bright
+// arc per water tile whose phase drifts with state.time and tile coord.
+// Cheap (≈30 strokes/frame) and replaces the per-tile ripple animation we
+// moved into the world cache.
+function drawWaterSheen(x, y) {
+  const p = worldToScreen(x, y);
+  const w = TILE_W * state.zoom, h = TILE_H * state.zoom;
+  const phase = Math.sin(state.time * 1.8 + x * 0.7 + y * 0.5);
+  const alpha = 0.18 + 0.12 * Math.sin(state.time * 1.3 + x + y);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y - h/2);
+  ctx.lineTo(p.x + w/2, p.y);
+  ctx.lineTo(p.x, p.y + h/2);
+  ctx.lineTo(p.x - w/2, p.y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.strokeStyle = `rgba(220,240,255,${alpha})`;
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.moveTo(p.x - w/2 * 0.65, p.y + phase * 2.5);
+  ctx.quadraticCurveTo(p.x, p.y - 3 + phase * 2.5, p.x + w/2 * 0.65, p.y + phase * 2.5);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -240,23 +288,18 @@ function treeVariant(tx, ty) {
   return (tx * 91 + ty * 37 + (tx ^ ty)) & 3;
 }
 
-function terrainColors(type, timeOfDay, tx, ty) {
-  // timeOfDay ∈ [0, 1), 0 = dawn
-  const t = timeOfDay;
-  const dayness = 0.5 + 0.5 * Math.sin((t - 0.25) * Math.PI * 2); // 0 midnight, 1 noon
-  const tint = 0.3 + 0.7 * dayness;
-  // Base colors
+function terrainColors(type, _timeOfDay, tx, ty) {
+  // Base colors — time-independent so the world cache stays static. The
+  // global multiply overlay handles day/night; water animation is a
+  // separately-drawn sheen, not a base color shift.
   const base = {
     [TERRAIN.GRASS]: [120 + (tx*37+ty*19)%15, 190 + (tx*13)%15, 100 + (ty*23)%20],
     [TERRAIN.FOREST]: [60, 130 + (tx*7+ty*11)%20, 60],
     [TERRAIN.STONE]: [140, 138, 142],
-    [TERRAIN.WATER]: [70, 160 + Math.sin(state.time*1.2 + tx*0.4 + ty*0.4)*20, 200],
+    [TERRAIN.WATER]: [70, 160 + ((tx*13+ty*7)%20 - 10), 200],
     [TERRAIN.SAND]: [220, 200, 150],
   }[type];
-  const r = Math.floor(base[0] * tint);
-  const g = Math.floor(base[1] * tint);
-  const b = Math.floor(base[2] * tint);
-  return `rgb(${r},${g},${b})`;
+  return `rgb(${base[0]},${base[1]},${base[2]})`;
 }
 
 // Sky gradient by time-of-day — reactive background
@@ -794,13 +837,37 @@ function nearbyBuilding(b, kind) {
 }
 
 // ─── Render frame ──────────────────────────────────────────────────────────
+// Rebake the static world (terrain, trees, rocks, shore fringe) into the
+// offscreen world canvas. Called only when state.worldDirty is set.
+function renderWorld() {
+  const prev = ctx;
+  ctx = worldCtx;
+  try {
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    for (let y = 0; y < MAP_SIZE; y++)
+      for (let x = 0; x < MAP_SIZE; x++)
+        drawTile(x, y);
+  } finally {
+    ctx = prev;
+  }
+}
 function render() {
   drawSky();
-  // World — back-to-front in painter's order
+  // Bake the static world on demand; then blit it onto the main canvas so
+  // the dynamic pass has a finished terrain to paint entities over.
+  if (state.worldDirty) { renderWorld(); state.worldDirty = false; }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);   // draw in device pixels for a 1:1 blit
+  ctx.drawImage(worldCanvas, 0, 0);
+  ctx.restore();
+  // Dynamic pass — buildings + colonists + water sheen, all z-sorted together
+  // so colonists hide correctly behind tall structures and appear in front
+  // when south of them.
   const drawList = [];
   for (let y = 0; y < MAP_SIZE; y++)
     for (let x = 0; x < MAP_SIZE; x++)
-      drawList.push({ type: 'tile', x, y, depth: x + y });
+      if (state.map[y][x] === TERRAIN.WATER)
+        drawList.push({ type: 'water-sheen', x, y, depth: x + y + 0.01 });
   for (const b of state.buildings) {
     const def = BUILDINGS[b.kind];
     drawList.push({ type: 'building', ref: b, x: b.x, y: b.y, depth: (b.x + def.w - 0.5) + (b.y + def.h - 0.5) + 0.3 });
@@ -809,7 +876,7 @@ function render() {
     drawList.push({ type: 'colonist', ref: c, depth: c.x + c.y + 0.2 });
   drawList.sort((a, b) => a.depth - b.depth);
   for (const item of drawList) {
-    if (item.type === 'tile') drawTile(item.x, item.y);
+    if (item.type === 'water-sheen') drawWaterSheen(item.x, item.y);
     else if (item.type === 'building') {
       const def = BUILDINGS[item.ref.kind];
       const p = worldToScreen(item.x + def.w/2 - 0.5, item.y + def.h/2 - 0.5);
@@ -1057,7 +1124,10 @@ canvas.addEventListener('pointermove', (e) => {
   if (dragging && dragStart) {
     const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
     if (Math.hypot(dx, dy) > 5) dragMoved = true;
-    if (dragMoved) { state.camX = dragStart.camX + dx; state.camY = dragStart.camY + dy; }
+    if (dragMoved) {
+      state.camX = dragStart.camX + dx; state.camY = dragStart.camY + dy;
+      markWorldDirty();
+    }
   }
   const w = screenToWorld(e.clientX, e.clientY);
   if (w.x >= 0 && w.y >= 0 && w.x < MAP_SIZE && w.y < MAP_SIZE) state.hoverTile = w;
@@ -1075,6 +1145,7 @@ canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const d = e.deltaY > 0 ? 0.9 : 1.1;
   state.zoom = Math.max(0.5, Math.min(2.2, state.zoom * d));
+  markWorldDirty();
 }, { passive: false });
 
 function onTap(w) {
@@ -1103,10 +1174,10 @@ function onTap(w) {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { state.selected = null; state.selectedEntity = null; renderPalette(); updateInfo(); }
   const panStep = 30;
-  if (e.key === 'ArrowLeft') state.camX += panStep;
-  if (e.key === 'ArrowRight') state.camX -= panStep;
-  if (e.key === 'ArrowUp') state.camY += panStep;
-  if (e.key === 'ArrowDown') state.camY -= panStep;
+  if (e.key === 'ArrowLeft') { state.camX += panStep; markWorldDirty(); }
+  if (e.key === 'ArrowRight') { state.camX -= panStep; markWorldDirty(); }
+  if (e.key === 'ArrowUp') { state.camY += panStep; markWorldDirty(); }
+  if (e.key === 'ArrowDown') { state.camY -= panStep; markWorldDirty(); }
   if (e.key === ' ') { e.preventDefault(); state.paused = !state.paused; }
   if (e.key >= '1' && e.key <= '8') {
     const k = BUILD_ORDER[parseInt(e.key, 10) - 1];
@@ -1192,6 +1263,7 @@ window.addEventListener('popstate', () => {
     state.buildings = []; state.colonists = []; state.pop = 0;
     state.resources = { food: 20, wood: 60, stone: 15, gold: 0 };
     state.selected = null; state.selectedEntity = null;
+    markWorldDirty();
     toast('Loaded shared map from URL.');
   }
 });
