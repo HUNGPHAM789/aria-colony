@@ -996,67 +996,134 @@ const CHIMNEY_SPOTS = {
   TOWN_HALL:  [6, -39],
   LUMBERYARD: [-6, -21],
 };
-// Walls — two-tone shaded rectangle with a peaked roof that also has a
-// highlight slope and a shadow slope. Light from upper-left.
+// Iso-volume walls — flat front face (preserves decoration positions) with
+// a shadowed side face extending back-right and a gabled roof that tilts
+// into the distance. Signature kept drop-in compatible.
+// wallW: flat front wall width; wallH: building depth for iso side; roofH:
+// total height (wall + roof peak).
 function drawWalls(cx, cy, wallW, wallH, roofH, bodyColor, roofColor) {
   const halfW = wallW / 2;
-  const wallTop = cy - roofH * 0.55;
-  // Body — lit half
+  const wallZ = roofH * 0.6;
+  const wallTop = cy - wallZ;
+  // Iso depth going back-right. Larger wallH = deeper building.
+  const depth = Math.min(wallH * 0.4, wallW * 0.45);
+  const dx = depth * 0.75;   // screen x offset for "back"
+  const dy = depth * 0.42;   // screen y offset for "back" (up+right)
+  const bodyShade = darkenRgb(hexToRgb(bodyColor), 0.68);
+  const roofShade = darkenRgb(hexToRgb(roofColor), 0.62);
+
+  // BACK WALL (faint rim behind the roof, visible above the ridge line)
+  ctx.fillStyle = bodyShade;
+  ctx.beginPath();
+  ctx.moveTo(cx - halfW + dx, wallTop - dy);
+  ctx.lineTo(cx + halfW + dx, wallTop - dy);
+  ctx.lineTo(cx + halfW, wallTop);
+  ctx.lineTo(cx - halfW, wallTop);
+  ctx.closePath(); ctx.fill();
+
+  // SIDE WALL (right) — trapezoid extending back-right
+  ctx.fillStyle = bodyShade;
+  ctx.beginPath();
+  ctx.moveTo(cx + halfW, cy);
+  ctx.lineTo(cx + halfW + dx, cy - dy);
+  ctx.lineTo(cx + halfW + dx, wallTop - dy);
+  ctx.lineTo(cx + halfW, wallTop);
+  ctx.closePath(); ctx.fill();
+  // Side wall vertical grain
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 0.5;
+  for (let t = 0.2; t < 1; t += 0.25) {
+    const x1 = cx + halfW + dx * t;
+    const y1 = cy - dy * t;
+    const y2 = wallTop - dy * t;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1, y2); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 0.8;
+  ctx.strokeRect(cx + halfW, wallTop, dx, dy);
+
+  // FRONT WALL (flat, decoration-compatible position preserved)
   ctx.fillStyle = bodyColor;
   ctx.beginPath();
   ctx.moveTo(cx - halfW, cy);
+  ctx.lineTo(cx + halfW, cy);
+  ctx.lineTo(cx + halfW, wallTop);
   ctx.lineTo(cx - halfW, wallTop);
-  ctx.lineTo(cx + halfW, wallTop);
-  ctx.lineTo(cx + halfW, cy);
   ctx.closePath(); ctx.fill();
-  // Body — shadow half overlay (right side, diagonal wash)
-  ctx.fillStyle = darkenRgb(hexToRgb(bodyColor), 0.75);
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + halfW, cy);
-  ctx.lineTo(cx + halfW, wallTop);
-  ctx.lineTo(cx, wallTop);
-  ctx.closePath(); ctx.fill();
-  // Subtle plank/brick texture — faint horizontal lines across the wall
-  ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 0.6;
-  for (let y = wallTop + 3; y < cy - 1; y += 4) {
+  // Front wall board lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 0.6;
+  const bands = Math.max(3, Math.floor(wallZ / 5));
+  for (let i = 1; i < bands; i++) {
+    const y = wallTop + (wallZ / bands) * i;
     ctx.beginPath();
     ctx.moveTo(cx - halfW + 1, y);
     ctx.lineTo(cx + halfW - 1, y);
     ctx.stroke();
   }
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1;
-  ctx.strokeRect(cx - halfW, wallTop, wallW, roofH * 0.55);
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 0.9;
+  ctx.strokeRect(cx - halfW, wallTop, wallW, wallZ);
+  // Corner quoins — stone-like caps on each front corner for weight
+  ctx.fillStyle = darkenRgb(hexToRgb(bodyColor), 0.55);
+  ctx.fillRect(cx - halfW, wallTop, 2.0, wallZ);
+  ctx.fillRect(cx + halfW - 2.0, wallTop, 2.0, wallZ);
 
-  // Roof — left slope (lit)
+  // ROOF — front gable triangle (lit)
   ctx.fillStyle = roofColor;
   ctx.beginPath();
   ctx.moveTo(cx - halfW - 2, wallTop);
   ctx.lineTo(cx, cy - roofH);
-  ctx.lineTo(cx, wallTop);
-  ctx.closePath(); ctx.fill();
-  // Roof — right slope (shadow)
-  ctx.fillStyle = darkenRgb(hexToRgb(roofColor), 0.68);
-  ctx.beginPath();
-  ctx.moveTo(cx, wallTop);
-  ctx.lineTo(cx, cy - roofH);
   ctx.lineTo(cx + halfW + 2, wallTop);
   ctx.closePath(); ctx.fill();
-  // Roof shingle lines — thin stripes following slope
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.6;
-  for (let i = 1; i <= 3; i++) {
-    const ratio = i / 4;
-    const yLeft = wallTop - (roofH - roofH * 0.55) * ratio;
-    ctx.beginPath();
-    ctx.moveTo(cx - halfW - 2 + (halfW + 2) * ratio, yLeft);
-    ctx.lineTo(cx + halfW + 2 - (halfW + 2) * ratio, yLeft);
-    ctx.stroke();
-  }
-  // Ridge line
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 0.9;
   ctx.beginPath();
-  ctx.moveTo(cx, cy - roofH);
-  ctx.lineTo(cx, wallTop);
+  ctx.moveTo(cx - halfW - 2, wallTop);
+  ctx.lineTo(cx, cy - roofH);
+  ctx.lineTo(cx + halfW + 2, wallTop);
+  ctx.stroke();
+  // Gable shingle lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.5;
+  for (let i = 1; i <= 3; i++) {
+    const t = i / 4;
+    const yL = wallTop;
+    const yT = cy - roofH;
+    const lx = cx - halfW - 2 + (halfW + 2) * t;
+    const rx = cx + halfW + 2 - (halfW + 2) * t;
+    const ly = wallTop + (yT - yL) * t;
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(rx, ly); ctx.stroke();
+  }
+
+  // ROOF — side slope (shaded) — parallelogram going from front peak back
+  // and from right eave back, meeting at a back-peak point.
+  const peakF = { x: cx, y: cy - roofH };
+  const peakB = { x: cx + dx, y: cy - roofH - dy };
+  const eaveFR = { x: cx + halfW + 2, y: wallTop };
+  const eaveBR = { x: cx + halfW + 2 + dx, y: wallTop - dy };
+  ctx.fillStyle = roofShade;
+  ctx.beginPath();
+  ctx.moveTo(peakF.x, peakF.y);
+  ctx.lineTo(eaveFR.x, eaveFR.y);
+  ctx.lineTo(eaveBR.x, eaveBR.y);
+  ctx.lineTo(peakB.x, peakB.y);
+  ctx.closePath(); ctx.fill();
+  // Side-slope shingle lines (follow the slope from front to back edges)
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const t = i / 4;
+    const ax = peakF.x + (eaveFR.x - peakF.x) * t;
+    const ay = peakF.y + (eaveFR.y - peakF.y) * t;
+    const bx = peakB.x + (eaveBR.x - peakB.x) * t;
+    const by = peakB.y + (eaveBR.y - peakB.y) * t;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  }
+  // Ridge line (front-peak → back-peak)
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(peakF.x, peakF.y); ctx.lineTo(peakB.x, peakB.y);
+  ctx.stroke();
+  // Side-slope silhouette
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(eaveFR.x, eaveFR.y);
+  ctx.lineTo(eaveBR.x, eaveBR.y);
+  ctx.lineTo(peakB.x, peakB.y);
   ctx.stroke();
 }
 // Draw a small stone chimney at (ox, oy) offset from building center.
@@ -1154,17 +1221,66 @@ function drawColonist(c) {
   ctx.fillRect(p.x - 2.6*sc, p.y - 3.8*sc, 5.2*sc, 0.8*sc);
 
   // Front arm + optional tool. Drawn last so it sits on top of the torso.
-  ctx.fillStyle = shirt;
-  const frontArmX = p.x + (face > 0 ? 2.4 : -4.2)*sc;
-  ctx.fillRect(frontArmX, p.y - 8*sc + armA - bob, 1.8*sc, 5*sc);
-  // Hand — small skin circle at the arm tip
+  // Chopping override: when c.chopping is true the arm cycles through a
+  // raise-and-slam pose instead of walking swing. Coupled with wood-chip
+  // particles emitted during the impact frame.
+  let frontArmY = p.y - 8*sc + armA - bob;
+  let handX = (p.x + (face > 0 ? 2.4 : -4.2)*sc) + 0.9*sc;
+  let handY = p.y - 3.2*sc + armA - bob;
+  let armAngle = 0;
+  let chopT = 0;
+  if (c.chopping) {
+    // Chop cycle: 60 ticks; 0..0.5 raise, 0.5..0.6 slam, 0.6..1 settle.
+    chopT = ((state.tick + c.id * 7) % 60) / 60;
+    if (chopT < 0.5)        armAngle = -chopT * Math.PI * 1.2;         // lift up
+    else if (chopT < 0.62)  armAngle = -Math.PI * 0.6 + (chopT - 0.5) * Math.PI * 5.5;  // slam
+    else                    armAngle = Math.PI * 0.1;                  // follow-through
+    // Pivot arm around shoulder at (shoulderX, shoulderY)
+    const shoulderX = p.x + face * 2.6*sc;
+    const shoulderY = p.y - 8.5*sc - bob;
+    const armLen = 5*sc;
+    handX = shoulderX + Math.sin(armAngle) * armLen * face;
+    handY = shoulderY + Math.cos(armAngle) * armLen;
+    // Draw arm as a rotated rect from shoulder → hand
+    ctx.save();
+    ctx.translate(shoulderX, shoulderY);
+    ctx.rotate(armAngle * face);
+    ctx.fillStyle = shirt;
+    ctx.fillRect(-0.9*sc, 0, 1.8*sc, armLen);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = shirt;
+    const frontArmX = p.x + (face > 0 ? 2.4 : -4.2)*sc;
+    ctx.fillRect(frontArmX, frontArmY, 1.8*sc, 5*sc);
+  }
+  // Hand
   ctx.fillStyle = '#f4c7a0';
   ctx.beginPath();
-  ctx.arc(frontArmX + 0.9*sc, p.y - 3.2*sc + armA - bob, 0.95*sc, 0, Math.PI*2);
+  ctx.arc(handX, handY, 0.95*sc, 0, Math.PI*2);
   ctx.fill();
-  // Tool
+  // Tool — draw rotated when chopping so the axe swings with the arm.
   if (c.job && JOB_TOOLS[c.job]) {
-    drawColonistTool(JOB_TOOLS[c.job], frontArmX + 0.9*sc, p.y - 3.2*sc + armA - bob, sc, face, walkPhase);
+    if (c.chopping) {
+      ctx.save();
+      ctx.translate(handX, handY);
+      ctx.rotate(armAngle * face);
+      drawColonistTool(JOB_TOOLS[c.job], 0, 0, sc, face, 0);
+      ctx.restore();
+      // Wood chips fly during the impact window.
+      if (chopT > 0.55 && chopT < 0.75) {
+        ctx.fillStyle = '#c4a070';
+        for (let i = 0; i < 4; i++) {
+          const seed = c.id * 13 + i * 29 + Math.floor(state.tick / 60);
+          const ang = (seed % 31) / 31 * Math.PI - Math.PI;
+          const dist = ((chopT - 0.55) / 0.2) * (4 + (seed % 5)) * sc;
+          const cx2 = handX + Math.cos(ang) * dist;
+          const cy2 = handY + Math.abs(Math.sin(ang)) * dist * 0.6;
+          ctx.fillRect(cx2, cy2, 1.2*sc, 0.8*sc);
+        }
+      }
+    } else {
+      drawColonistTool(JOB_TOOLS[c.job], handX, handY, sc, face, walkPhase);
+    }
   }
 
   // Head
@@ -1396,19 +1512,48 @@ function updateColonist(c, dt) {
       c.cooldown -= dt;
     }
   } else {
-    // Worker: bob between building and a random nearby tile (simulating labor)
+    // Worker cycle — lumberjacks walk to real forest tiles and chop; other
+    // workers bob near their building.
     if (c.cooldown <= 0) {
       c.cooldown = 3 + Math.random() * 2;
-      if (Math.random() < 0.5) {
-        c.targetX = c.building.x + BUILDINGS[c.building.kind].w / 2;
-        c.targetY = c.building.y + BUILDINGS[c.building.kind].h / 2;
+      const b = c.building;
+      if (c.job === 'LUMBERYARD' && Math.random() < 0.7) {
+        // Pick a nearby forest tile.
+        let picked = null;
+        for (let attempts = 0; attempts < 12; attempts++) {
+          const rx = Math.max(0, Math.min(MAP_SIZE - 1, b.x + Math.floor((Math.random() - 0.5) * 10)));
+          const ry = Math.max(0, Math.min(MAP_SIZE - 1, b.y + Math.floor((Math.random() - 0.5) * 10)));
+          if (state.map[ry][rx] === TERRAIN.FOREST) { picked = { x: rx, y: ry }; break; }
+        }
+        if (picked) {
+          c.targetX = picked.x + 0.5; c.targetY = picked.y + 0.5;
+          c.choppingTarget = picked;
+          c.cooldown = 5 + Math.random() * 3; // stay and chop a while
+        } else {
+          c.targetX = b.x + (Math.random() - 0.5) * 4;
+          c.targetY = b.y + (Math.random() - 0.5) * 4;
+          c.choppingTarget = null;
+        }
+      } else if (Math.random() < 0.5) {
+        c.targetX = b.x + BUILDINGS[b.kind].w / 2;
+        c.targetY = b.y + BUILDINGS[b.kind].h / 2;
+        c.choppingTarget = null;
       } else {
-        c.targetX = c.building.x + (Math.random() - 0.5) * 4;
-        c.targetY = c.building.y + (Math.random() - 0.5) * 4;
+        c.targetX = b.x + (Math.random() - 0.5) * 4;
+        c.targetY = b.y + (Math.random() - 0.5) * 4;
+        c.choppingTarget = null;
       }
     }
     c.cooldown -= dt;
   }
+  // Evaluate current chopping state — true when we're a lumberjack standing
+  // on (or very close to) the forest tile we picked.
+  c.chopping = (
+    c.job === 'LUMBERYARD' &&
+    c.choppingTarget &&
+    Math.abs(c.x - (c.choppingTarget.x + 0.5)) < 0.7 &&
+    Math.abs(c.y - (c.choppingTarget.y + 0.5)) < 0.7
+  );
   // Move toward target
   const dx = c.targetX - c.x, dy = c.targetY - c.y;
   const d = Math.hypot(dx, dy);
