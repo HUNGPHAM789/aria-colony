@@ -65,9 +65,6 @@ const state = {
   // Global tick counter (OpenRCT2 + OpenTTD pattern). One int drives every
   // animation: water shimmer, smoke, selection pulse, banner wave.
   tick: 0,
-  // Weather — slow-varying ambient. 0 = clear, 1 = light rain, 2 = heavy rain.
-  weather: 0,
-  weatherChangeAt: 0,
   // Dual-canvas bookkeeping. Any change to the static world — pan, zoom, map
   // edit, build, demolish, resize — flips this so renderWorld() runs once on
   // the next frame to rebake the terrain cache.
@@ -417,7 +414,7 @@ function drawTile(x, y) {
   if (terr === TERRAIN.FOREST) {
     drawTree(p.x, cy - 4 * state.zoom, state.zoom, x, y);
   } else if (terr === TERRAIN.STONE) {
-    drawRock(p.x, cy - 2 * state.zoom, state.zoom);
+    drawRock(p.x, cy - 2 * state.zoom, state.zoom, x, y);
   } else if (terr === TERRAIN.WATER) {
     drawWaterRipple(p.x, cy, tw, th, x, y);
   }
@@ -478,17 +475,80 @@ function drawTree(cx, cy, sc, tx, ty) {
     ctx.beginPath(); ctx.arc(cx + 4*sc, cy - 10*sc, 4.5*sc, 0, Math.PI*2); ctx.fill();
   }
 }
-function drawRock(cx, cy, sc) {
-  ctx.fillStyle = '#6e6a74';
-  ctx.beginPath();
-  ctx.moveTo(cx - 10*sc, cy + 2*sc);
-  ctx.lineTo(cx - 8*sc, cy - 6*sc);
-  ctx.lineTo(cx + 2*sc, cy - 8*sc);
-  ctx.lineTo(cx + 8*sc, cy - 2*sc);
-  ctx.lineTo(cx + 6*sc, cy + 4*sc);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = '#4a464f'; ctx.lineWidth = 1; ctx.stroke();
+// Rock variants — different boulder shapes per tile so stone outcrops stop
+// reading as a gray floor and start reading as a rocky area. Colors cover
+// three weathered-stone shades; each boulder is a shaded pentagon with a
+// light top-left highlight polygon and an optional moss speckle.
+function rockVariant(tx, ty) { return ((tx * 31) ^ (ty * 17)) & 3; }
+function drawRock(cx, cy, sc, tx, ty) {
+  const v = tx !== undefined ? rockVariant(tx, ty) : 0;
+  const jitter = ((tx * 13 + ty * 17) & 7) - 3;
+  cx += jitter * sc * 0.4;
+  // Four boulder archetypes — tuple of (base, highlight, shadow, rotation, scale).
+  const stones = [
+    // v0: one tall central boulder + small buddy on the right
+    [[cx,       cy,      1.0, '#787480', '#9a96a4', '#4e4a56', 0],
+     [cx + 7*sc, cy + 2*sc, 0.55, '#6e6a76', '#8a8692', '#4a4650', 0]],
+    // v1: two boulders stacked
+    [[cx - 4*sc, cy + 1*sc, 0.72, '#8a8692', '#a8a4b2', '#5a5664', 0],
+     [cx + 2*sc, cy - 4*sc, 0.8, '#787480', '#989590', '#4a4650', 0]],
+    // v2: flat wide slab + pebble
+    [[cx,       cy + 1*sc, 1.1, '#6e6a76', '#8e8a96', '#454150', 1],
+     [cx - 6*sc, cy - 2*sc, 0.45, '#585460', '#7a7682', '#3a3640', 0]],
+    // v3: cluster of three small rocks
+    [[cx - 5*sc, cy + 1*sc, 0.55, '#6e6a76', '#8a8692', '#4a4650', 0],
+     [cx + 0*sc, cy - 3*sc, 0.6,  '#787480', '#989590', '#4e4a56', 0],
+     [cx + 6*sc, cy + 0*sc, 0.5,  '#585460', '#7a7682', '#3a3640', 0]],
+  ][v];
+  for (const [rx, ry, s, base, hi, sh, flat] of stones) {
+    // Base pentagon — slightly flattened for the "slab" variant.
+    const ph = flat ? 0.55 : 1.0;
+    ctx.fillStyle = base;
+    ctx.beginPath();
+    ctx.moveTo(rx - 7*s*sc, ry + 2*s*sc);
+    ctx.lineTo(rx - 5.5*s*sc, ry - 5*s*sc*ph);
+    ctx.lineTo(rx + 1*s*sc, ry - 6*s*sc*ph);
+    ctx.lineTo(rx + 6*s*sc, ry - 2*s*sc*ph);
+    ctx.lineTo(rx + 4*s*sc, ry + 3*s*sc);
+    ctx.closePath();
+    ctx.fill();
+    // Top-left highlight polygon — light-source from upper-left
+    ctx.fillStyle = hi;
+    ctx.beginPath();
+    ctx.moveTo(rx - 5.5*s*sc, ry - 5*s*sc*ph);
+    ctx.lineTo(rx + 1*s*sc, ry - 6*s*sc*ph);
+    ctx.lineTo(rx - 1*s*sc, ry - 3*s*sc*ph);
+    ctx.lineTo(rx - 4*s*sc, ry - 2*s*sc*ph);
+    ctx.closePath();
+    ctx.fill();
+    // Right-side shadow wedge
+    ctx.fillStyle = sh;
+    ctx.beginPath();
+    ctx.moveTo(rx + 6*s*sc, ry - 2*s*sc*ph);
+    ctx.lineTo(rx + 4*s*sc, ry + 3*s*sc);
+    ctx.lineTo(rx + 1.5*s*sc, ry + 0.5*s*sc);
+    ctx.lineTo(rx + 3*s*sc, ry - 3*s*sc*ph);
+    ctx.closePath();
+    ctx.fill();
+    // Dark outline — thin so the boulder reads crisp
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(rx - 7*s*sc, ry + 2*s*sc);
+    ctx.lineTo(rx - 5.5*s*sc, ry - 5*s*sc*ph);
+    ctx.lineTo(rx + 1*s*sc, ry - 6*s*sc*ph);
+    ctx.lineTo(rx + 6*s*sc, ry - 2*s*sc*ph);
+    ctx.lineTo(rx + 4*s*sc, ry + 3*s*sc);
+    ctx.closePath();
+    ctx.stroke();
+    // Moss speckle — small green patch on some boulders (deterministic)
+    if (((tx||0) * 7 + (ty||0) * 11 + Math.round(rx)) % 5 === 0) {
+      ctx.fillStyle = 'rgba(90,140,70,0.55)';
+      ctx.beginPath();
+      ctx.ellipse(rx - 2*s*sc, ry - 4*s*sc*ph, 1.8*s*sc, 0.8*s*sc, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
 }
 
 // ─── Building rendering ────────────────────────────────────────────────────
@@ -522,107 +582,334 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
   const flagCurl = Math.sin(windPhase * 1.3) * 1.2 * sc; // mid y curve
   // Building-specific art
   if (b.kind === 'TOWN_HALL') {
-    // Tall castle with flag
-    drawWalls(cx, cy, wPix * 0.75, hPix * 0.6, 28*sc, '#c48e5a', '#8a5a3a');
-    // Flag — pole + triangular banner that waves with the wind.
-    ctx.fillStyle = '#c0392b';
-    ctx.fillRect(cx - 1*sc, cy - 42*sc, 2*sc, 14*sc);
+    // Castle body with merlons on the parapet.
+    drawWalls(cx, cy, wPix * 0.8, hPix * 0.65, 30*sc, '#c48e5a', '#8a5a3a');
+    // Parapet band above the walls
+    ctx.fillStyle = '#a07450';
+    ctx.fillRect(cx - wPix*0.4, cy - 17*sc, wPix*0.8, 2.5*sc);
+    ctx.fillStyle = '#8a5a3a';
+    // Crenellations — alternating teeth along the top
+    for (let i = 0; i < 6; i++) {
+      const tx = cx - wPix*0.4 + i * (wPix*0.8 / 6) + wPix*0.8 / 12;
+      ctx.fillRect(tx - 2*sc, cy - 21*sc, 3*sc, 4*sc);
+    }
+    // Arched wooden door with iron bands
+    ctx.fillStyle = '#5a3a1e';
     ctx.beginPath();
-    ctx.moveTo(cx + 1*sc, cy - 42*sc);
+    ctx.moveTo(cx - 4*sc, cy - 1*sc);
+    ctx.lineTo(cx - 4*sc, cy - 9*sc);
+    ctx.quadraticCurveTo(cx, cy - 13*sc, cx + 4*sc, cy - 9*sc);
+    ctx.lineTo(cx + 4*sc, cy - 1*sc);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#2a1a0e'; ctx.lineWidth = 0.6;
+    for (let i = 1; i < 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(cx - 4*sc, cy - 1*sc - i*2*sc);
+      ctx.lineTo(cx + 4*sc, cy - 1*sc - i*2*sc);
+      ctx.stroke();
+    }
+    // Slit windows flanking the door
+    ctx.fillStyle = '#1a1228';
+    ctx.fillRect(cx - 10*sc, cy - 11*sc, 1.5*sc, 5*sc);
+    ctx.fillRect(cx + 8*sc, cy - 11*sc, 1.5*sc, 5*sc);
+    // Central keep rising above the main body
+    ctx.fillStyle = '#b88050';
+    ctx.fillRect(cx - 5*sc, cy - 32*sc, 10*sc, 12*sc);
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx - 5*sc, cy - 32*sc, 10*sc, 1.5*sc); // dark top band
+    // Keep crenellations
+    for (let i = 0; i < 3; i++) {
+      ctx.fillRect(cx - 5*sc + i * 3.5*sc, cy - 35*sc, 2.2*sc, 3*sc);
+    }
+    // Flag pole + waving banner
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(cx - 0.5*sc, cy - 48*sc, 1*sc, 14*sc);
+    ctx.fillStyle = '#c0392b';
+    ctx.beginPath();
+    ctx.moveTo(cx + 0.5*sc, cy - 48*sc);
     ctx.quadraticCurveTo(
-      cx + 6*sc + flagWave, cy - 38*sc + flagCurl,
-      cx + 12*sc + flagWave, cy - 38*sc
+      cx + 5*sc + flagWave, cy - 45*sc + flagCurl,
+      cx + 10*sc + flagWave, cy - 44*sc
     );
     ctx.quadraticCurveTo(
-      cx + 6*sc + flagWave, cy - 34*sc + flagCurl,
-      cx + 1*sc, cy - 34*sc
+      cx + 5*sc + flagWave, cy - 41*sc + flagCurl,
+      cx + 0.5*sc, cy - 40*sc
     );
     ctx.closePath(); ctx.fill();
+    // Chimney on the keep
+    drawChimney(cx, cy, sc, 6, -32);
   } else if (b.kind === 'HOUSE') {
-    drawWalls(cx, cy, wPix * 0.65, hPix * 0.6, 14*sc, '#d4a574', '#8a5a3a');
-    // Door
-    ctx.fillStyle = '#5a3a1e'; ctx.fillRect(cx - 2*sc, cy - 6*sc, 4*sc, 8*sc);
-    // Window
-    ctx.fillStyle = '#f6c56b'; ctx.fillRect(cx + 6*sc, cy - 10*sc, 3*sc, 3*sc);
+    drawWalls(cx, cy, wPix * 0.7, hPix * 0.62, 16*sc, '#d4a574', '#8a3a2a');
+    // Door with frame
+    ctx.fillStyle = '#3a2412';
+    ctx.fillRect(cx - 2.4*sc, cy - 7*sc, 4.8*sc, 8*sc);
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx - 2*sc, cy - 6.5*sc, 4*sc, 7.5*sc);
+    // Door handle
+    ctx.fillStyle = '#d4b060';
+    ctx.fillRect(cx + 1.2*sc, cy - 3*sc, 0.6*sc, 0.6*sc);
+    // Window with cross mullion
+    ctx.fillStyle = '#3a2412'; ctx.fillRect(cx + 5*sc, cy - 11*sc, 4*sc, 4*sc);
+    ctx.fillStyle = '#f6c56b'; ctx.fillRect(cx + 5.4*sc, cy - 10.6*sc, 3.2*sc, 3.2*sc);
+    ctx.strokeStyle = '#3a2412'; ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + 7*sc, cy - 10.6*sc); ctx.lineTo(cx + 7*sc, cy - 7.4*sc);
+    ctx.moveTo(cx + 5.4*sc, cy - 9*sc);  ctx.lineTo(cx + 8.6*sc, cy - 9*sc);
+    ctx.stroke();
+    // Flower box under the window
+    ctx.fillStyle = '#5a3a1e';
+    ctx.fillRect(cx + 4.6*sc, cy - 7*sc, 4.8*sc, 1.2*sc);
+    ctx.fillStyle = '#e85a5a';
+    ctx.beginPath(); ctx.arc(cx + 5.5*sc, cy - 7.2*sc, 0.6*sc, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#f6c56b';
+    ctx.beginPath(); ctx.arc(cx + 7*sc, cy - 7.2*sc, 0.6*sc, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#9a4fbf';
+    ctx.beginPath(); ctx.arc(cx + 8.3*sc, cy - 7.2*sc, 0.6*sc, 0, Math.PI*2); ctx.fill();
+    // Chimney on the roof ridge
+    drawChimney(cx, cy, sc, -5, -14, 2.4, 6);
   } else if (b.kind === 'LUMBERYARD') {
-    drawWalls(cx, cy, wPix * 0.7, hPix * 0.55, 16*sc, '#a87a4e', '#6a4a2e');
-    // Logs stack
-    ctx.fillStyle = '#6a3a1e';
-    for (let i = 0; i < 3; i++) ctx.fillRect(cx - 18*sc, cy - 2*sc + i*3*sc, 10*sc, 2*sc);
-    // Axe
-    ctx.fillStyle = '#8a8a8a'; ctx.fillRect(cx + 12*sc, cy - 8*sc, 2*sc, 10*sc);
-    ctx.fillStyle = '#aaa'; ctx.fillRect(cx + 10*sc, cy - 10*sc, 6*sc, 3*sc);
+    drawWalls(cx, cy, wPix * 0.72, hPix * 0.55, 16*sc, '#a87a4e', '#6a4a2e');
+    // Sawhorse on the left — two crossed legs with a plank on top.
+    ctx.strokeStyle = '#5a3a1e'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 20*sc, cy - 6*sc); ctx.lineTo(cx - 16*sc, cy - 1*sc);
+    ctx.moveTo(cx - 16*sc, cy - 6*sc); ctx.lineTo(cx - 20*sc, cy - 1*sc);
+    ctx.stroke();
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx - 22*sc, cy - 7*sc, 8*sc, 1.4*sc);
+    // Logs stacked on the right — round ends visible.
+    for (let i = 0; i < 3; i++) {
+      const ly = cy - 3*sc - i * 2.2*sc;
+      ctx.fillStyle = '#7a4a24';
+      ctx.fillRect(cx + 10*sc, ly, 10*sc, 2*sc);
+      ctx.fillStyle = '#c4a070';
+      ctx.beginPath(); ctx.arc(cx + 10*sc, ly + 1*sc, 1*sc, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#8a5a3a';
+      ctx.beginPath(); ctx.arc(cx + 10*sc, ly + 1*sc, 0.5*sc, 0, Math.PI*2); ctx.fill();
+    }
+    // Wood chips on the ground
+    ctx.fillStyle = '#c4a070';
+    for (let i = 0; i < 6; i++) {
+      ctx.fillRect(cx - 18*sc + i * 3*sc, cy + 1*sc + (i%2)*sc, 1.2*sc, 0.6*sc);
+    }
+    // Chimney (for the drying furnace)
+    drawChimney(cx, cy, sc, -6, -14);
   } else if (b.kind === 'FARM') {
-    // Plowed field pattern
+    // Wooden fence posts around the field perimeter
+    ctx.fillStyle = '#6a4a2e';
+    for (let i = 0; i < 4; i++) {
+      const fx = cx - wPix*0.4 + i * (wPix*0.8 / 3);
+      ctx.fillRect(fx - 0.5*sc, cy + 8*sc, 1*sc, 3*sc);
+    }
+    // Plowed rows — alternating dark/light soil with crop tufts.
     const rows = 4;
     for (let r = 0; r < rows; r++) {
-      const rw = wPix * 0.85;
-      const rh = hPix * 0.85 / rows;
-      ctx.fillStyle = r % 2 === 0 ? '#c08a4a' : '#d8a564';
-      drawDiamond(cx + (r-1.5)*8*sc, cy + (r-1.5)*4*sc, rw * 0.3, rh * 0.6);
-      // Wheat
+      const ry = cy + (r - 1.5) * 5*sc;
+      const rx = cx + (r - 1.5) * 8*sc;
+      ctx.fillStyle = r % 2 === 0 ? '#6e4a28' : '#8a5a34';
+      drawDiamond(rx, ry, wPix * 0.35, hPix * 0.18);
+      // Wheat tufts
+      ctx.strokeStyle = '#d4a040'; ctx.lineWidth = 0.7;
       ctx.fillStyle = '#f4d06f';
-      for (let j = 0; j < 4; j++) {
-        ctx.fillRect(cx + (r-1.5)*8*sc - 6*sc + j*3*sc, cy + (r-1.5)*4*sc - 5*sc, 1*sc, 5*sc);
+      for (let j = 0; j < 5; j++) {
+        const wx = rx - 8*sc + j * 3.4*sc;
+        const wy = ry - 1*sc;
+        ctx.beginPath();
+        ctx.moveTo(wx, wy + 3*sc);
+        ctx.lineTo(wx, wy - 4*sc);
+        ctx.stroke();
+        ctx.fillRect(wx - 0.6*sc, wy - 5*sc, 1.2*sc, 1.6*sc);
       }
     }
-  } else if (b.kind === 'QUARRY') {
-    // Rocky pit
-    ctx.fillStyle = '#4a464f';
-    drawDiamond(cx, cy, wPix * 0.75, hPix * 0.55);
-    for (let i = 0; i < 5; i++) {
-      const rx = cx + (i-2) * 8*sc;
-      const ry = cy + (i-2) * 3*sc;
-      ctx.fillStyle = ['#8a8a8a', '#6a6a6a', '#7a7a7a'][i % 3];
-      ctx.beginPath(); ctx.arc(rx, ry, 4*sc, 0, Math.PI*2); ctx.fill();
-    }
-  } else if (b.kind === 'MARKET') {
-    drawWalls(cx, cy, wPix * 0.6, hPix * 0.55, 10*sc, '#e8b876', '#8a5a3a');
-    // Awning
-    ctx.fillStyle = '#e85a5a';
+    // Scarecrow at the top corner
+    const scx = cx + wPix*0.3, scy = cy - 6*sc;
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(scx - 0.4*sc, scy, 0.8*sc, 8*sc);         // pole
+    ctx.fillRect(scx - 3*sc, scy + 2*sc, 6*sc, 0.8*sc);    // crossbar
+    ctx.fillStyle = '#c4a070';
+    ctx.beginPath(); ctx.arc(scx, scy - 0.5*sc, 1.6*sc, 0, Math.PI*2); ctx.fill(); // head
+    ctx.fillStyle = '#5a3a1e';                              // hat
+    ctx.fillRect(scx - 1.8*sc, scy - 2.2*sc, 3.6*sc, 0.8*sc);
     ctx.beginPath();
-    ctx.moveTo(cx - wPix*0.35, cy - 12*sc);
-    ctx.lineTo(cx + wPix*0.35, cy - 12*sc);
-    ctx.lineTo(cx + wPix*0.3, cy - 18*sc);
-    ctx.lineTo(cx - wPix*0.3, cy - 18*sc);
+    ctx.moveTo(scx - 1.2*sc, scy - 2.2*sc);
+    ctx.lineTo(scx, scy - 3.6*sc);
+    ctx.lineTo(scx + 1.2*sc, scy - 2.2*sc);
     ctx.closePath(); ctx.fill();
-    // Coin
+  } else if (b.kind === 'QUARRY') {
+    // Pit with soft gradient floor.
+    const grad = ctx.createRadialGradient(cx, cy - 1*sc, 2*sc, cx, cy - 1*sc, wPix * 0.5);
+    grad.addColorStop(0, '#2a252e');
+    grad.addColorStop(1, '#4a454f');
+    ctx.fillStyle = grad;
+    drawDiamond(cx, cy, wPix * 0.8, hPix * 0.6);
+    // Scaffolding — two wooden planks on supports along the left edge.
+    ctx.strokeStyle = '#6a4a2e'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 14*sc, cy - 2*sc); ctx.lineTo(cx - 14*sc, cy - 10*sc);
+    ctx.moveTo(cx - 8*sc,  cy - 3*sc); ctx.lineTo(cx - 8*sc,  cy - 11*sc);
+    ctx.stroke();
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx - 16*sc, cy - 11*sc, 10*sc, 1.4*sc);
+    // Rocks — piles of chunked stone with highlights.
+    for (let i = 0; i < 6; i++) {
+      const rx = cx + ((i * 73) % 20 - 10) * sc;
+      const ry = cy - 1*sc + ((i * 41) % 8 - 4) * sc;
+      const rs = 2.4 + (i % 3) * 0.8;
+      ctx.fillStyle = ['#9a9aa2', '#7a7a82', '#6a6a72'][i % 3];
+      ctx.beginPath(); ctx.arc(rx, ry, rs*sc, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.beginPath(); ctx.arc(rx - 0.8*sc, ry - 0.8*sc, rs*0.4*sc, 0, Math.PI*2); ctx.fill();
+    }
+    // Minecart on the right
+    ctx.fillStyle = '#3a2412';
+    ctx.fillRect(cx + 8*sc, cy - 2*sc, 8*sc, 4*sc);
+    ctx.fillStyle = '#6a6a72';  // stones inside
+    ctx.fillRect(cx + 9*sc, cy - 3*sc, 6*sc, 1.5*sc);
+    ctx.fillStyle = '#1a1228';
+    ctx.beginPath(); ctx.arc(cx + 9*sc, cy + 2*sc, 1.2*sc, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 15*sc, cy + 2*sc, 1.2*sc, 0, Math.PI*2); ctx.fill();
+  } else if (b.kind === 'MARKET') {
+    drawWalls(cx, cy, wPix * 0.62, hPix * 0.55, 11*sc, '#e8b876', '#8a5a3a');
+    // Striped awning (red/white) instead of flat red
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - wPix*0.38, cy - 12*sc);
+    ctx.lineTo(cx + wPix*0.38, cy - 12*sc);
+    ctx.lineTo(cx + wPix*0.32, cy - 19*sc);
+    ctx.lineTo(cx - wPix*0.32, cy - 19*sc);
+    ctx.closePath();
+    ctx.clip();
+    const stripeW = 4 * sc;
+    const span = wPix * 0.76;
+    for (let i = 0; i < span / stripeW; i++) {
+      ctx.fillStyle = i % 2 === 0 ? '#e85a5a' : '#f4ecdb';
+      ctx.fillRect(cx - wPix*0.38 + i * stripeW, cy - 19*sc, stripeW, 8*sc);
+    }
+    ctx.restore();
+    // Awning edge line
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - wPix*0.38, cy - 12*sc);
+    ctx.lineTo(cx + wPix*0.38, cy - 12*sc);
+    ctx.stroke();
+    // Barrels (left)
+    for (let i = 0; i < 2; i++) {
+      const bx = cx - 15*sc + i * 5*sc, by = cy;
+      ctx.fillStyle = '#8a5a3a';
+      ctx.fillRect(bx - 2*sc, by - 4*sc, 4*sc, 6*sc);
+      ctx.strokeStyle = '#2a1a0e'; ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(bx - 2*sc, by - 2.5*sc); ctx.lineTo(bx + 2*sc, by - 2.5*sc);
+      ctx.moveTo(bx - 2*sc, by - 1*sc);   ctx.lineTo(bx + 2*sc, by - 1*sc);
+      ctx.stroke();
+    }
+    // Fruit basket (right)
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx + 12*sc, cy - 3*sc, 6*sc, 4*sc);
+    const fruitColors = ['#e85a5a', '#f6c56b', '#9a4fbf', '#7ce27c'];
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = fruitColors[i];
+      ctx.beginPath();
+      ctx.arc(cx + 13*sc + (i%2)*2*sc, cy - 4*sc + Math.floor(i/2)*1.3*sc, 0.9*sc, 0, Math.PI*2);
+      ctx.fill();
+    }
+    // Coin sign
     ctx.fillStyle = '#f6c56b';
-    ctx.beginPath(); ctx.arc(cx, cy - 4*sc, 3*sc, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy - 5*sc, 2.5*sc, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#b8893f'; ctx.lineWidth = 0.6; ctx.stroke();
   } else if (b.kind === 'WELL') {
-    // Stone base
-    ctx.fillStyle = '#888';
+    // Stone ring — two tones for depth
+    ctx.fillStyle = '#5a5660';
+    ctx.beginPath(); ctx.ellipse(cx, cy - 1*sc, 13*sc, 6.5*sc, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#8a8692';
     ctx.beginPath(); ctx.ellipse(cx, cy - 2*sc, 12*sc, 6*sc, 0, 0, Math.PI*2); ctx.fill();
     ctx.fillStyle = '#4fb3d9';
     ctx.beginPath(); ctx.ellipse(cx, cy - 3*sc, 9*sc, 4*sc, 0, 0, Math.PI*2); ctx.fill();
-    // Roof
+    // Water ripple highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.ellipse(cx - 2*sc, cy - 3.5*sc, 3*sc, 1*sc, 0, 0, Math.PI*2); ctx.stroke();
+    // Wooden supports for the winch
+    ctx.fillStyle = '#6a4a2e';
+    ctx.fillRect(cx - 8*sc, cy - 16*sc, 1.5*sc, 14*sc);
+    ctx.fillRect(cx + 6.5*sc, cy - 16*sc, 1.5*sc, 14*sc);
+    // Winch handle
+    ctx.fillStyle = '#8a5a3a';
+    ctx.fillRect(cx - 8*sc, cy - 16*sc, 17*sc, 1.4*sc);
+    // Rope + bucket
+    ctx.strokeStyle = '#3a2412'; ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.moveTo(cx, cy - 15*sc); ctx.lineTo(cx, cy - 7*sc); ctx.stroke();
+    ctx.fillStyle = '#6a4a2e';
+    ctx.fillRect(cx - 2*sc, cy - 7*sc, 4*sc, 3*sc);
+    // Peaked roof with shading
     ctx.fillStyle = '#8a5a3a';
     ctx.beginPath();
-    ctx.moveTo(cx - 8*sc, cy - 14*sc);
-    ctx.lineTo(cx, cy - 26*sc);
-    ctx.lineTo(cx + 8*sc, cy - 14*sc);
+    ctx.moveTo(cx - 10*sc, cy - 16*sc);
+    ctx.lineTo(cx, cy - 24*sc);
+    ctx.lineTo(cx + 10*sc, cy - 16*sc);
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#5a3a1e'; ctx.fillRect(cx - 1*sc, cy - 14*sc, 2*sc, 12*sc);
+    ctx.fillStyle = '#6a4020';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 24*sc);
+    ctx.lineTo(cx + 10*sc, cy - 16*sc);
+    ctx.lineTo(cx, cy - 16*sc);
+    ctx.closePath(); ctx.fill();
   } else if (b.kind === 'WATCHTOWER') {
-    // Tall thin tower
-    drawWalls(cx, cy, 16*sc, 10*sc, 36*sc, '#b8956a', '#6a4a2e');
-    // Top viewing platform
-    ctx.fillStyle = '#8a5a3a';
-    ctx.fillRect(cx - 10*sc, cy - 40*sc, 20*sc, 4*sc);
-    // Waving flag — quadratic curve so the banner billows instead of rigid tri.
+    // Three stone segments — base → mid → top — each slightly darker.
+    ctx.fillStyle = '#9a8a6a';
+    ctx.fillRect(cx - 9*sc, cy - 14*sc, 18*sc, 14*sc);
+    ctx.fillStyle = '#7a6a50';
+    ctx.fillRect(cx - 8*sc, cy - 28*sc, 16*sc, 14*sc);
+    ctx.fillStyle = '#6a5a3e';
+    ctx.fillRect(cx - 7*sc, cy - 40*sc, 14*sc, 12*sc);
+    // Stone block lines
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.5;
+    for (let seg = 0; seg < 3; seg++) {
+      const top = cy - (14 + seg * 14)*sc;
+      const halfw = (9 - seg) * sc;
+      for (let y = 2; y < 12; y += 3) {
+        const off = (y % 2 === 0) ? 0 : halfw / 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - halfw, top + y*sc);
+        ctx.lineTo(cx + halfw, top + y*sc);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx - halfw + off, top + y*sc);
+        ctx.lineTo(cx - halfw + off, top + (y + 3)*sc);
+        ctx.stroke();
+      }
+    }
+    // Arrow slits at each tier
+    ctx.fillStyle = '#1a1228';
+    ctx.fillRect(cx - 0.8*sc, cy - 11*sc, 1.6*sc, 3.5*sc);
+    ctx.fillRect(cx - 0.8*sc, cy - 25*sc, 1.6*sc, 3.5*sc);
+    // Wooden viewing platform with railing
+    ctx.fillStyle = '#6a4a2e';
+    ctx.fillRect(cx - 11*sc, cy - 41*sc, 22*sc, 3*sc);
+    ctx.strokeStyle = '#3a2412'; ctx.lineWidth = 0.8;
+    for (let i = 0; i < 5; i++) {
+      const rx = cx - 10*sc + i * 5*sc;
+      ctx.beginPath();
+      ctx.moveTo(rx, cy - 41*sc); ctx.lineTo(rx, cy - 45*sc);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(cx - 10*sc, cy - 45*sc); ctx.lineTo(cx + 10*sc, cy - 45*sc);
+    ctx.stroke();
+    // Flag pole + banner
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(cx - 0.5*sc, cy - 54*sc, 1*sc, 10*sc);
     ctx.fillStyle = '#4fb3d9';
     ctx.beginPath();
-    ctx.moveTo(cx + 1*sc, cy - 44*sc);
+    ctx.moveTo(cx + 0.5*sc, cy - 54*sc);
     ctx.quadraticCurveTo(
-      cx + 4*sc + flagWave * 0.7, cy - 43*sc + flagCurl * 0.7,
-      cx + 8*sc + flagWave * 0.7, cy - 42*sc
+      cx + 4*sc + flagWave * 0.7, cy - 51*sc + flagCurl * 0.7,
+      cx + 8*sc + flagWave * 0.7, cy - 50*sc
     );
     ctx.quadraticCurveTo(
-      cx + 4*sc + flagWave * 0.7, cy - 41*sc + flagCurl * 0.7,
-      cx + 1*sc, cy - 40*sc
+      cx + 4*sc + flagWave * 0.7, cy - 48*sc + flagCurl * 0.7,
+      cx + 0.5*sc, cy - 48*sc
     );
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#aaa'; ctx.fillRect(cx, cy - 48*sc, 1*sc, 8*sc);
   }
   // Night glow — warm window flicker on completed inhabited buildings when
   // the sun is down. Cheap: a couple shadow-blurred dots per structure.
@@ -702,53 +989,260 @@ function drawBuildingArt(b, cx, cy, sc, ghost = false) {
   }
   ctx.globalAlpha = 1;
 }
-// Relative chimney positions per building kind. null = no smoke.
+// Relative chimney top positions per building kind — smoke rises from here.
+// Kept in sync with drawChimney calls inside each building's art block.
 const CHIMNEY_SPOTS = {
-  HOUSE:      [6, -16],
-  TOWN_HALL:  [-8, -22],
-  LUMBERYARD: [-10, -14],
-  MARKET:     [-8, -16],
+  HOUSE:      [-5, -21],
+  TOWN_HALL:  [6, -39],
+  LUMBERYARD: [-6, -21],
 };
+// Walls — two-tone shaded rectangle with a peaked roof that also has a
+// highlight slope and a shadow slope. Light from upper-left.
 function drawWalls(cx, cy, wallW, wallH, roofH, bodyColor, roofColor) {
-  // Body
+  const halfW = wallW / 2;
+  const wallTop = cy - roofH * 0.55;
+  // Body — lit half
   ctx.fillStyle = bodyColor;
   ctx.beginPath();
-  ctx.moveTo(cx - wallW/2, cy);
-  ctx.lineTo(cx - wallW/2, cy - roofH*0.55);
-  ctx.lineTo(cx + wallW/2, cy - roofH*0.55);
-  ctx.lineTo(cx + wallW/2, cy);
+  ctx.moveTo(cx - halfW, cy);
+  ctx.lineTo(cx - halfW, wallTop);
+  ctx.lineTo(cx + halfW, wallTop);
+  ctx.lineTo(cx + halfW, cy);
   ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
-  // Roof (simple peaked)
+  // Body — shadow half overlay (right side, diagonal wash)
+  ctx.fillStyle = darkenRgb(hexToRgb(bodyColor), 0.75);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + halfW, cy);
+  ctx.lineTo(cx + halfW, wallTop);
+  ctx.lineTo(cx, wallTop);
+  ctx.closePath(); ctx.fill();
+  // Subtle plank/brick texture — faint horizontal lines across the wall
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 0.6;
+  for (let y = wallTop + 3; y < cy - 1; y += 4) {
+    ctx.beginPath();
+    ctx.moveTo(cx - halfW + 1, y);
+    ctx.lineTo(cx + halfW - 1, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1;
+  ctx.strokeRect(cx - halfW, wallTop, wallW, roofH * 0.55);
+
+  // Roof — left slope (lit)
   ctx.fillStyle = roofColor;
   ctx.beginPath();
-  ctx.moveTo(cx - wallW/2 - 2, cy - roofH*0.55);
+  ctx.moveTo(cx - halfW - 2, wallTop);
   ctx.lineTo(cx, cy - roofH);
-  ctx.lineTo(cx + wallW/2 + 2, cy - roofH*0.55);
+  ctx.lineTo(cx, wallTop);
   ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.stroke();
+  // Roof — right slope (shadow)
+  ctx.fillStyle = darkenRgb(hexToRgb(roofColor), 0.68);
+  ctx.beginPath();
+  ctx.moveTo(cx, wallTop);
+  ctx.lineTo(cx, cy - roofH);
+  ctx.lineTo(cx + halfW + 2, wallTop);
+  ctx.closePath(); ctx.fill();
+  // Roof shingle lines — thin stripes following slope
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.6;
+  for (let i = 1; i <= 3; i++) {
+    const ratio = i / 4;
+    const yLeft = wallTop - (roofH - roofH * 0.55) * ratio;
+    ctx.beginPath();
+    ctx.moveTo(cx - halfW - 2 + (halfW + 2) * ratio, yLeft);
+    ctx.lineTo(cx + halfW + 2 - (halfW + 2) * ratio, yLeft);
+    ctx.stroke();
+  }
+  // Ridge line
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - roofH);
+  ctx.lineTo(cx, wallTop);
+  ctx.stroke();
+}
+// Draw a small stone chimney at (ox, oy) offset from building center.
+function drawChimney(cx, cy, sc, ox, oy, w = 3, h = 7) {
+  const x = cx + ox * sc, y = cy + oy * sc;
+  ctx.fillStyle = '#6a5a50';
+  ctx.fillRect(x - w*sc/2, y - h*sc, w*sc, h*sc);
+  ctx.fillStyle = '#4a3e38';
+  ctx.fillRect(x - w*sc/2, y - (h+0.5)*sc, w*sc, 0.9*sc);
+  // Brick lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.5;
+  for (let i = 1; i < h; i += 2) {
+    ctx.beginPath();
+    ctx.moveTo(x - w*sc/2, y - i*sc);
+    ctx.lineTo(x + w*sc/2, y - i*sc);
+    ctx.stroke();
+  }
 }
 
 // ─── Colonist rendering ────────────────────────────────────────────────────
+// Tool sprites for working colonists. Drawn in the "front" hand.
+const JOB_TOOLS = {
+  LUMBERYARD: 'axe',
+  QUARRY:     'pick',
+  FARM:       'scythe',
+  MARKET:     'coin',
+  TOWN_HALL:  null,
+  HOUSE:      null,
+  WELL:       null,
+  WATCHTOWER: 'spear',
+};
 function drawColonist(c) {
   const p = worldToScreen(c.x, c.y);
   const sc = state.zoom;
   // Lift the colonist onto whatever tile they're standing on.
   const lift = tileHeight(Math.floor(c.x), Math.floor(c.y)) * sc;
   p.y -= lift;
-  const bob = Math.sin(state.time * 8 + c.id) * 1.5 * sc;
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.beginPath(); ctx.ellipse(p.x, p.y + 2*sc, 4*sc, 1.5*sc, 0, 0, Math.PI*2); ctx.fill();
-  // Body
-  ctx.fillStyle = c.color || '#6aa8e0';
-  ctx.fillRect(p.x - 3*sc, p.y - 9*sc + bob, 6*sc, 8*sc);
+  // Movement vector → facing and walk amount. Walk distance is accumulated
+  // on the colonist object in update(), so the step cycle advances only
+  // when actually moving (idle villagers stand still).
+  const dx = c.targetX - c.x, dy = c.targetY - c.y;
+  const moving = Math.hypot(dx, dy) > 0.04;
+  // Face: -1 = left-facing, +1 = right-facing. Derived from iso x delta.
+  const face = (dx - dy) >= 0 ? 1 : -1;
+  const walkPhase = (c.walkDist || 0) * 9;
+  const step = moving ? Math.sin(walkPhase) : 0;
+  // Pose values
+  const bob    = moving ? Math.abs(Math.cos(walkPhase)) * 0.8 * sc : Math.sin(state.time * 2 + c.id) * 0.3 * sc;
+  const legA   = step *  2.2 * sc;
+  const legB   = step * -2.2 * sc;
+  const armA   = step * -2.8 * sc;
+  const armB   = step *  2.8 * sc;
+
+  // Soft drop shadow (elliptical, squashed for iso perspective)
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + 1*sc, 4*sc, 1.6*sc, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Legs — behind the body, so draw first.
+  ctx.fillStyle = '#3a2a48';
+  ctx.fillRect(p.x - 2.4*sc + legA, p.y - 3*sc, 2*sc, 3.5*sc);
+  ctx.fillRect(p.x + 0.4*sc + legB, p.y - 3*sc, 2*sc, 3.5*sc);
+  // Boots — tiny darker caps
+  ctx.fillStyle = '#1a1228';
+  ctx.fillRect(p.x - 2.6*sc + legA, p.y - 0.4*sc, 2.4*sc, 1.1*sc);
+  ctx.fillRect(p.x + 0.2*sc + legB, p.y - 0.4*sc, 2.4*sc, 1.1*sc);
+
+  // Back arm — partially hidden behind torso
+  const shirt = c.color || '#6aa8e0';
+  const shirtShade = darkenRgb(shirt.startsWith('#') ? hexToRgb(shirt) : shirt, 0.72);
+  ctx.fillStyle = shirtShade;
+  ctx.fillRect(p.x + (face > 0 ? -3.6 : 2.6)*sc, p.y - 8*sc + armB - bob, 1.8*sc, 5*sc);
+
+  // Torso — tapered rectangle via trapezoid path for shoulders.
+  ctx.fillStyle = shirt;
+  ctx.beginPath();
+  ctx.moveTo(p.x - 2.6*sc, p.y - 3*sc);               // lower-left hip
+  ctx.lineTo(p.x + 2.6*sc, p.y - 3*sc);               // lower-right hip
+  ctx.lineTo(p.x + 3.0*sc, p.y - 8.5*sc);             // upper-right shoulder
+  ctx.lineTo(p.x - 3.0*sc, p.y - 8.5*sc);             // upper-left shoulder
+  ctx.closePath();
+  ctx.fill();
+  // Torso shading — darker band along the shadow-facing side
+  ctx.fillStyle = shirtShade;
+  ctx.beginPath();
+  ctx.moveTo(p.x + (face > 0 ? 0.4 : -2.6)*sc, p.y - 3*sc);
+  ctx.lineTo(p.x + (face > 0 ? 2.6 : -0.4)*sc, p.y - 3*sc);
+  ctx.lineTo(p.x + (face > 0 ? 3.0 : -0.6)*sc, p.y - 8.5*sc);
+  ctx.lineTo(p.x + (face > 0 ? 0.6 : -3.0)*sc, p.y - 8.5*sc);
+  ctx.closePath();
+  ctx.fill();
+  // Belt
+  ctx.fillStyle = '#5a3a1e';
+  ctx.fillRect(p.x - 2.6*sc, p.y - 3.8*sc, 5.2*sc, 0.8*sc);
+
+  // Front arm + optional tool. Drawn last so it sits on top of the torso.
+  ctx.fillStyle = shirt;
+  const frontArmX = p.x + (face > 0 ? 2.4 : -4.2)*sc;
+  ctx.fillRect(frontArmX, p.y - 8*sc + armA - bob, 1.8*sc, 5*sc);
+  // Hand — small skin circle at the arm tip
+  ctx.fillStyle = '#f4c7a0';
+  ctx.beginPath();
+  ctx.arc(frontArmX + 0.9*sc, p.y - 3.2*sc + armA - bob, 0.95*sc, 0, Math.PI*2);
+  ctx.fill();
+  // Tool
+  if (c.job && JOB_TOOLS[c.job]) {
+    drawColonistTool(JOB_TOOLS[c.job], frontArmX + 0.9*sc, p.y - 3.2*sc + armA - bob, sc, face, walkPhase);
+  }
+
   // Head
   ctx.fillStyle = '#f4c7a0';
-  ctx.beginPath(); ctx.arc(p.x, p.y - 12*sc + bob, 3*sc, 0, Math.PI*2); ctx.fill();
-  // Hat (tiny)
-  ctx.fillStyle = '#3a2755';
-  ctx.fillRect(p.x - 3*sc, p.y - 14*sc + bob, 6*sc, 1.5*sc);
+  ctx.beginPath();
+  ctx.arc(p.x + face * 0.2*sc, p.y - 10.2*sc - bob, 2.4*sc, 0, Math.PI*2);
+  ctx.fill();
+  // Face shading on the shadow side
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath();
+  ctx.arc(p.x + face * -1.1*sc, p.y - 10.2*sc - bob, 1.4*sc, 0, Math.PI*2);
+  ctx.fill();
+  // Hair / hood — darker cap hugging the crown
+  const hairColors = ['#3a2755', '#5a3a1e', '#2a1a1a', '#6a4020'];
+  ctx.fillStyle = hairColors[c.id % hairColors.length];
+  ctx.beginPath();
+  ctx.arc(p.x + face * 0.2*sc, p.y - 11.6*sc - bob, 2.4*sc, Math.PI * 1.05, Math.PI * 1.95, false);
+  ctx.lineTo(p.x + face * 0.2*sc + 2.4*sc, p.y - 11.6*sc - bob);
+  ctx.closePath();
+  ctx.fill();
+  // Eye — one dot facing forward
+  ctx.fillStyle = '#1a1228';
+  ctx.fillRect(p.x + face * 1.1*sc, p.y - 10.4*sc - bob, 0.7*sc, 0.7*sc);
+}
+function drawColonistTool(kind, hx, hy, sc, face, walkPhase) {
+  // Subtle tool bob so it swings slightly with the step cycle.
+  const wobble = Math.sin(walkPhase * 2) * 0.4 * sc;
+  ctx.save();
+  ctx.translate(hx, hy + wobble);
+  if (kind === 'axe') {
+    ctx.fillStyle = '#6a3a1e';
+    ctx.fillRect(-0.5*sc, -7*sc, 1*sc, 8*sc);
+    ctx.fillStyle = '#9a9a9a';
+    ctx.beginPath();
+    ctx.moveTo(-0.5*sc, -7*sc);
+    ctx.lineTo(2.8*sc * face, -7.8*sc);
+    ctx.lineTo(2.2*sc * face, -5.2*sc);
+    ctx.lineTo(0.5*sc, -5*sc);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#4a4a4a'; ctx.lineWidth = 0.6; ctx.stroke();
+  } else if (kind === 'pick') {
+    ctx.fillStyle = '#6a3a1e';
+    ctx.fillRect(-0.5*sc, -7*sc, 1*sc, 8*sc);
+    ctx.strokeStyle = '#8a8a94'; ctx.lineWidth = 1.4*sc;
+    ctx.beginPath();
+    ctx.moveTo(-2.8*sc * face, -7.5*sc);
+    ctx.lineTo(2.8*sc * face, -6.5*sc);
+    ctx.stroke();
+  } else if (kind === 'scythe') {
+    ctx.fillStyle = '#6a3a1e';
+    ctx.fillRect(-0.5*sc, -8*sc, 1*sc, 9*sc);
+    ctx.strokeStyle = '#bfbfbf'; ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.arc(1.5*sc * face, -8*sc, 4*sc, Math.PI * 0.9, Math.PI * 1.6, face < 0);
+    ctx.stroke();
+  } else if (kind === 'spear') {
+    ctx.fillStyle = '#6a3a1e';
+    ctx.fillRect(-0.3*sc, -10*sc, 0.8*sc, 11*sc);
+    ctx.fillStyle = '#d4d4dc';
+    ctx.beginPath();
+    ctx.moveTo(-0.5*sc, -10*sc);
+    ctx.lineTo(0.5*sc, -10*sc);
+    ctx.lineTo(0, -12.5*sc);
+    ctx.closePath(); ctx.fill();
+  } else if (kind === 'coin') {
+    ctx.fillStyle = '#f6c56b';
+    ctx.beginPath();
+    ctx.arc(1.5*sc * face, -4.5*sc, 1.4*sc, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#b8893f'; ctx.lineWidth = 0.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+// Accept hex strings in darkenRgb — needed for colonist shirt shading.
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return 'rgb(120,120,120)';
+  return `rgb(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)})`;
 }
 
 // ─── Can place check ──────────────────────────────────────────────────────
@@ -920,8 +1414,10 @@ function updateColonist(c, dt) {
   const d = Math.hypot(dx, dy);
   if (d > 0.01) {
     const speed = 1.5;
-    c.x += (dx / d) * Math.min(speed * dt, d);
-    c.y += (dy / d) * Math.min(speed * dt, d);
+    const step = Math.min(speed * dt, d);
+    c.x += (dx / d) * step;
+    c.y += (dy / d) * step;
+    c.walkDist = (c.walkDist || 0) + step;
   }
   // Clamp inside map
   c.x = Math.max(0, Math.min(MAP_SIZE - 1, c.x));
@@ -1058,51 +1554,8 @@ function render() {
       ctx.restore();
     }
   }
-  // Weather overlay — rain streak pattern offset by tick (OpenRCT2
-  // WeatherDrawer.cpp:84-198). No particle state; one draw per layer.
-  if (state.weather > 0) {
-    drawWeatherOverlay();
-  }
   // Minimap
   renderMiniMap();
-}
-
-// Cached rain pattern — built once, offset-drawn per frame.
-let _rainPattern = null;
-function getRainPattern() {
-  if (_rainPattern) return _rainPattern;
-  const c = document.createElement('canvas');
-  c.width = 120; c.height = 120;
-  const cc = c.getContext('2d');
-  cc.strokeStyle = 'rgba(180,210,255,0.55)';
-  cc.lineWidth = 1;
-  for (let i = 0; i < 30; i++) {
-    const x = Math.random() * 120;
-    const y = Math.random() * 120;
-    cc.beginPath();
-    cc.moveTo(x, y);
-    cc.lineTo(x - 4, y + 12);
-    cc.stroke();
-  }
-  _rainPattern = ctx.createPattern(c, 'repeat');
-  return _rainPattern;
-}
-function drawWeatherOverlay() {
-  const heavy = state.weather >= 2;
-  const layers = heavy ? 3 : 1;
-  const pat = getRainPattern();
-  for (let i = 0; i < layers; i++) {
-    ctx.save();
-    // Positive shift → pattern scrolls DOWN and slightly LEFT with the
-    // streak angle, so drops appear to fall. Earlier negative values made
-    // rain fly upward. Modulo keeps translate small to avoid precision drift.
-    const ox = -((state.tick * (2 + i)) % 120);
-    const oy =  ((state.tick * (14 + i * 3)) % 120);
-    ctx.translate(ox, oy);
-    ctx.fillStyle = pat;
-    ctx.fillRect(-ox - 120, -oy - 120, window.innerWidth + 240, window.innerHeight + 240);
-    ctx.restore();
-  }
 }
 function renderMiniMap() {
   const mw = miniCanvas.width, mh = miniCanvas.height;
@@ -1407,20 +1860,6 @@ function loop(now) {
   lastT = now;
   // Global tick drives all animation. One int, shared across systems.
   state.tick = (state.tick + 1) >>> 0;
-  // Weather cycle — longer clear stretches than rainy ones so rain feels
-  // like an occasional event, not the default mood. Clear is the rest state.
-  if (state.tick > state.weatherChangeAt) {
-    const roll = Math.random();
-    if (state.weather === 0) {
-      // Currently clear — mostly stay clear; small chance to roll into rain.
-      state.weather = roll < 0.82 ? 0 : roll < 0.96 ? 1 : 2;
-      state.weatherChangeAt = state.tick + 3600 + ((state.tick * 131) & 2047); // ~1–1.5 min clear
-    } else {
-      // Currently raining — always revert to clear on the next tick.
-      state.weather = 0;
-      state.weatherChangeAt = state.tick + 1800 + ((state.tick * 131) & 1023); // ~30–50s rain
-    }
-  }
   update(dt);
   render();
   renderHUD();
