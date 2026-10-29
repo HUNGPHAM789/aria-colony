@@ -1,0 +1,31 @@
+name: Three.js Prototype CI
+
+on:
+  pull_request:
+    paths:
+      - "threejs-prototype/**"
+      - ".github/workflows/threejs-prototype.yml"
+  push:
+    branches: [main, threejs-prototype]
+    paths:
+      - "threejs-prototype/**"
+      - ".github/workflows/threejs-prototype.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: threejs-prototype
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Type-check and build
+        run: npm run build

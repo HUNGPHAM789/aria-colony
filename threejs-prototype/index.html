@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#18251d" />
+    <meta name="description" content="A tiny living settlement — a 3D colony-builder prototype." />
+    <title>Aria Colony 3D — Prototype</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="game-root" aria-label="3D colony game world"></div>
+      <header class="topbar">
+        <div class="brand-mark">A</div>
+        <div class="brand-copy"><strong>ARIA COLONY</strong><span>FRONTIER SETTLEMENT</span></div>
+        <div class="season-pill"><span class="season-dot"></span> SPRING · DAY 03</div>
+        <div class="top-spacer"></div>
+        <button id="pause-button" class="icon-button" aria-label="Pause simulation">Ⅱ</button>
+        <button id="speed-button" class="speed-button">1× SPEED</button>
+      </header>
+      <aside class="left-panel">
+        <div class="panel-eyebrow">YOUR SETTLEMENT</div>
+        <h1>Little Haven</h1>
+        <div class="settlement-subtitle"><span class="online-dot"></span> A peaceful beginning</div>
+        <div class="resource-grid">
+          <div class="resource-card"><span class="resource-icon wood-icon">⌁</span><div><small>WOOD</small><strong id="wood-count">24</strong></div><span class="resource-change">+<b id="wood-rate">0</b></span></div>
+          <div class="resource-card"><span class="resource-icon food-icon">✳</span><div><small>FOOD</small><strong id="food-count">18</strong></div><span class="resource-change">+0</span></div>
+          <div class="resource-card"><span class="resource-icon stone-icon">◆</span><div><small>STONE</small><strong id="stone-count">12</strong></div><span class="resource-change">+0</span></div>
+          <div class="resource-card"><span class="resource-icon people-icon">♙</span><div><small>POPULATION</small><strong id="population-count">3 / 12</strong></div><span class="resource-change neutral">HAPPY</span></div>
+        </div>
+        <div class="panel-divider"></div>
+        <div class="section-heading"><span>SETTLEMENT</span><span class="tiny-badge">LEVEL 1</span></div>
+        <div class="progress-row"><span>Prosperity</span><strong id="prosperity-value">18%</strong></div>
+        <div class="progress-track"><div id="prosperity-bar" class="progress-fill" style="width:18%"></div></div>
+        <div class="section-heading tasks-heading"><span>WORK ORDERS</span><span class="task-count">02 ACTIVE</span></div>
+        <div class="work-order active-order"><span class="order-icon">⌁</span><div><strong>Gather timber</strong><small>Chop trees and deliver logs</small></div><span class="order-state">ACTIVE</span></div>
+        <div class="work-order"><span class="order-icon stone-order">◆</span><div><strong>Prepare the village</strong><small>More buildings coming soon</small></div><span class="order-state queued">QUEUED</span></div>
+        <div class="panel-note"><span class="note-spark">✦</span><span>Your villagers are working automatically. Select a villager to inspect their current task.</span></div>
+      </aside>
+      <div class="right-tools">
+        <button id="home-button" class="tool-button" title="Reset camera"><span>⌂</span><small>HOME</small></button>
+        <button id="toggle-labels" class="tool-button selected" title="Toggle name labels"><span>♧</span><small>LABELS</small></button>
+      </div>
+      <div class="bottom-hint"><span class="hint-mouse">↖</span> DRAG TO ORBIT <i></i> SCROLL TO ZOOM <i></i> SELECT A VILLAGER</div>
+      <section id="inspector" class="inspector hidden">
+        <button id="close-inspector" class="close-inspector" aria-label="Close inspector">×</button>
+        <div class="inspector-avatar">♙</div>
+        <div class="inspector-copy"><small>VILLAGER</small><strong id="inspector-name">Milo</strong><span id="inspector-job">Woodcutter · Working</span></div>
+        <div class="inspector-stat"><small>ENERGY</small><div class="mini-meter"><span style="width:82%"></span></div><strong>82%</strong></div>
+      </section>
+      <div id="toast" class="toast hidden"></div>
+      <div class="loading-screen" id="loading-screen"><div class="loading-mark">A</div><strong>Preparing your settlement</strong><span>Growing grass · Waking villagers</span><div class="loading-track"><i></i></div></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
