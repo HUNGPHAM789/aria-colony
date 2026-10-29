@@ -8,7 +8,7 @@ type Worker = {
   id: number; name: string; root: THREE.Group; body: THREE.Group;
   leftArm: THREE.Group; rightArm: THREE.Group; leftLeg: THREE.Group; rightLeg: THREE.Group;
   state: WorkerState; targetTree: THREE.Group; phase: number; workTime: number;
-  path: THREE.Vector3[]; pathIndex: number; carriedLog?: THREE.Mesh;
+  path: THREE.Vector3[]; pathIndex: number; carriedLog?: THREE.Mesh | null;
 };
 
 const scene = new THREE.Scene();
@@ -319,8 +319,9 @@ function updateWorker(w:Worker,dt:number){
   w.workTime+=dt*speed;w.rightArm.rotation.x=-0.4;w.leftArm.rotation.x=-0.4;
   if(w.workTime>0.7){
    if(w.carriedLog){w.root.remove(w.carriedLog);w.carriedLog.geometry.dispose();w.carriedLog=null;}
-   wood+=3;updateHud();walkToTree(w);
+   wood+=3;updateHud();
    w.targetTree=trees[(w.id+Math.floor(wood/3))%trees.length]!;
+   walkToTree(w);
   }
  }
  if(selected===w){
